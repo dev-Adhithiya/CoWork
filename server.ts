@@ -594,7 +594,7 @@ async function summarizeTranscript(transcript: MeetingTranscript, force = false)
   if (ai) {
     try {
       const result = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
+        model: "gemini-1.5-pro",
         contents: [{
           role: "user",
           parts: [{ text: `Return only valid JSON matching this schema: ${schema}\nPrior running summary:\n${previousSummary || "(none)"}\nNew transcript chunks:\n${chunkText}\nProduce a concise running meeting summary that incorporates the new chunks without re-summarizing from scratch.` }],
@@ -669,7 +669,7 @@ async function generateJsonWithRetry<T>(prompt: string, validate: (value: any) =
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const result = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
+        model: "gemini-1.5-pro",
         contents: [{ role: "user", parts: [{ text: prompt }] }],
       });
       const parsed = JSON.parse(result.text || "{}");
@@ -747,7 +747,7 @@ async function generateStandupDigest(workspaceId: string, date: string) {
   if (ai) {
     try {
       const result = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
+        model: "gemini-1.5-pro",
         contents: [{
           role: "user",
           parts: [{ text: `Return only valid JSON matching this schema: ${schema}\nMerge these standup updates into one coherent digest grouped by theme/project. Preserve attribution explicitly: every claim, blocker, or next step must name who said it.\nStandup entries:\n${entryText}` }],
@@ -1512,7 +1512,7 @@ app.post("/chat", upload.any(), async (req: AuthRequest, res) => {
       const promptContext = `You are Co-Work, a proactive Chief of Staff AI assistant. Current workspace: ${req.workspace!.name}. Recent resolved GitHub mentions: ${JSON.stringify(githubContext)}. Pending tasks: ${getWorkspaceScoped(tasks, req).filter((t) => !t.is_completed).map((t) => t.title).join(", ")}. When the user wants to send an email or schedule a meeting/calendar event with Google Meet, call the corresponding tool.`;
       const contents = session.messages.slice(-8).map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] }));
       const result = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-1.5-flash",
         contents,
         config: {
           systemInstruction: promptContext,
