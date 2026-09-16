@@ -40,10 +40,7 @@ export function ChatInterface() {
           <CoWorkLogo size="sm" variant="icon" />
           <div>
             <h1 className="text-base font-bold text-white tracking-tight flex items-center gap-2">
-              Co-Work
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/20 text-blue-400 font-medium border border-blue-500/30">
-                Workspace AI
-              </span>
+              Co-Work AI
             </h1>
             <p className="text-xs text-white/40">
               Proactive Assistant & Chief of Staff

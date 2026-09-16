@@ -42,6 +42,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
+    const providerType = localStorage.getItem('auth_provider');
+    const cachedToken = localStorage.getItem('access_token');
+    if (providerType === 'workspace' && cachedToken) {
+      authAPI.getCurrentUser().then((currentUser) => {
+        setUser(currentUser);
+        localStorage.setItem('user', JSON.stringify(currentUser));
+      }).catch(() => {
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('user');
+        localStorage.removeItem('auth_provider');
+        setUser(null);
+      });
+    }
     console.log('[AuthContext] Subscribing to Firebase onAuthStateChanged...');
     const unsubscribe = onAuthStateChanged(
       auth,
@@ -127,12 +140,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         displayName: result.user.displayName,
       });
 
-      const credential = GoogleAuthProvider.credentialFromResult(result);
+      const workspaceLogin = await authAPI.login({
+        email: result.user.email || undefined,
+        name: result.user.displayName || undefined,
+      });
       localStorage.setItem('auth_provider', 'firebase');
-      if (credential?.accessToken) {
-        cachedAccessToken = credential.accessToken;
+      if (workspaceLogin.token) {
+        cachedAccessToken = workspaceLogin.token;
         localStorage.setItem('access_token', cachedAccessToken);
-        console.log('Google OAuth access token retrieved and stored.');
+        if (workspaceLogin.user) {
+          setUser(workspaceLogin.user);
+          localStorage.setItem('user', JSON.stringify(workspaceLogin.user));
+        }
+        console.log('Workspace session linked to Google identity.');
       } else {
         localStorage.setItem('access_token', `fb_token_${result.user.uid}`);
       }

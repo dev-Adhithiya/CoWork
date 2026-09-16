@@ -1,0 +1,427 @@
+// CoWork Prisma Schema
+// Decisions: normalized ChatSession/ChatMessage (images JSONB), normalized
+// MeetingTranscript chunks/summaries (separate tables), ActionItem keeps
+// string sourceType/sourceId, per-user UserPreferences (nested JSONB),
+// notes.tags as native Postgres String[], githubCache + roomPresence stay
+// in-memory. Room extended with meeting-state fields for Room/Meeting merge.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Auth ────────────────────────────────────────────────────────────────────
+
+model User {
+  id        String   @id               // base64url-derived or Firebase UID
+  email     String   @unique
+  name      String
+  picture   String?
+  settings  Json     @default("{}")
+  timezone  String   @default("UTC")
+  createdAt DateTime @default(now())
+  lastLogin DateTime @default(now())
+
+  authTokens        AuthToken[]
+  workspaceMembers  WorkspaceMember[]
+  channelMembers    ChannelMember[]
+  messages          Message[]
+  standupEntries    StandupEntry[]
+  meetingRequests   MeetingRequest[]
+  preferences       UserPreferences?
+  chatSessions      ChatSession[]
+  calendarEvents    CalendarEvent[]
+  tasks             Task[]
+  notes             Note[]
+  emails            Email[]
+
+  @@map("users")
+}
+
+model AuthToken {
+  token     String   @id
+  userId    String
+  createdAt DateTime @default(now())
+  expiresAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("auth_tokens")
+}
+
+model UserPreferences {
+  id                      String   @id @default(cuid())
+  userId                  String   @unique
+  preferredMeetingTimes   String[] @default([])
+  frequentContacts        String[] @default([])
+  emailTone               String   @default("professional_concise")
+  customRules             String[] @default([])
+  workingHours            Json     @default("{\"start\":\"09:00\",\"end\":\"17:00\",\"days\":[\"Monday\",\"Tuesday\",\"Wednesday\",\"Thursday\",\"Friday\"]}")
+  notificationPreferences Json     @default("{\"daily_briefing\":true,\"email_alerts\":true,\"task_reminders\":true}")
+  updatedAt               DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_preferences")
+}
+
+// ─── Workspace ───────────────────────────────────────────────────────────────
+
+model Workspace {
+  id        String   @id
+  name      String
+  ownerId   String
+  createdAt DateTime @default(now())
+
+  members          WorkspaceMember[]
+  channels         Channel[]
+  rooms            Room[]
+  githubConnection GithubConnection?
+  standupEntries   StandupEntry[]
+  standupDigests   StandupDigest[]
+  blockers         Blocker[]
+  actionItems      ActionItem[]
+  meetingTranscripts MeetingTranscript[]
+  meetingRequests  MeetingRequest[]
+  chatSessions     ChatSession[]
+  calendarEvents   CalendarEvent[]
+  tasks            Task[]
+  notes            Note[]
+  emails           Email[]
+
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  workspaceId String
+  userId      String
+  role        String   @default("member") // owner | admin | member
+  joinedAt    DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, userId])
+  @@map("workspace_members")
+}
+
+// ─── Channels & Messages ─────────────────────────────────────────────────────
+
+model Channel {
+  id               String   @id
+  workspaceId      String
+  name             String
+  createdBy        String
+  linkedGithubRepo String?
+  createdAt        DateTime @default(now())
+
+  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  members   ChannelMember[]
+  messages  Message[]
+
+  @@map("channels")
+}
+
+model ChannelMember {
+  channelId String
+  userId    String
+  joinedAt  DateTime @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([channelId, userId])
+  @@map("channel_members")
+}
+
+model Message {
+  id         String   @id
+  channelId  String
+  authorId   String
+  authorName String
+  content    String
+  mentions   Json     @default("[]")
+  editedAt   DateTime?
+  createdAt  DateTime @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  author  User    @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@map("messages")
+}
+
+// ─── Rooms (presence + meeting state merged) ─────────────────────────────────
+
+model Room {
+  id                      String    @id
+  workspaceId             String
+  name                    String
+  isLiveMeeting           Boolean   @default(false)
+  activeMeetingTranscriptId String?
+  meetingStartedAt        DateTime?
+  createdAt               DateTime  @default(now())
+
+  workspace          Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  activeMeetingTranscript MeetingTranscript? @relation("ActiveRoomTranscript", fields: [activeMeetingTranscriptId], references: [id])
+
+  @@map("rooms")
+}
+
+// ─── GitHub ──────────────────────────────────────────────────────────────────
+
+model GithubConnection {
+  workspaceId    String   @id
+  encryptedToken String
+  updatedAt      DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("github_connections")
+}
+
+// ─── Meeting Transcripts ─────────────────────────────────────────────────────
+
+model MeetingTranscript {
+  id          String    @id
+  workspaceId String
+  meetingId   String
+  startedAt   DateTime  @default(now())
+  endedAt     DateTime?
+  lastSummarizedChunkIndex Int @default(0)
+
+  workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  chunks    TranscriptChunk[]
+  summaries MeetingSummary[]
+  activeInRooms Room[]       @relation("ActiveRoomTranscript")
+
+  @@map("meeting_transcripts")
+}
+
+model TranscriptChunk {
+  id           String   @id @default(cuid())
+  transcriptId String
+  speaker      String
+  text         String
+  timestamp    DateTime
+  createdAt    DateTime @default(now())
+
+  transcript MeetingTranscript @relation(fields: [transcriptId], references: [id], onDelete: Cascade)
+
+  @@map("transcript_chunks")
+}
+
+model MeetingSummary {
+  id               String   @id
+  transcriptId     String
+  summary          String
+  sourceChunkCount Int
+  status           String   // ai-generated | fallback
+  generatedAt      DateTime @default(now())
+
+  transcript MeetingTranscript @relation(fields: [transcriptId], references: [id], onDelete: Cascade)
+
+  @@map("meeting_summaries")
+}
+
+// ─── Standups ────────────────────────────────────────────────────────────────
+
+model StandupEntry {
+  id          String   @id
+  workspaceId String
+  userId      String
+  userName    String
+  date        String   // ISO date string YYYY-MM-DD
+  content     String
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  blockers  Blocker[]
+
+  @@map("standup_entries")
+}
+
+model StandupDigest {
+  id            String   @id
+  workspaceId   String
+  date          String
+  mergedSummary String
+  status        String   // ai-generated | fallback
+  generatedAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("standup_digests")
+}
+
+// ─── Blockers & Action Items ─────────────────────────────────────────────────
+
+model Blocker {
+  id                   String    @id
+  workspaceId          String
+  sourceStandupEntryId String
+  description          String
+  mentionedBy          String
+  severity             String    // blocking | at-risk | fyi | unclassified
+  relatedTo            String?
+  status               String    @default("active") // active | resolved
+  createdAt            DateTime  @default(now())
+  resolvedAt           DateTime?
+
+  workspace    Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  standupEntry StandupEntry @relation(fields: [sourceStandupEntryId], references: [id], onDelete: Cascade)
+
+  @@map("blockers")
+}
+
+model ActionItem {
+  id               String   @id
+  workspaceId      String
+  description      String
+  suggestedOwnerId String?
+  confirmedOwnerId String?
+  sourceType       String   // meeting | standup
+  sourceId         String
+  status           String   @default("suggested") // suggested | confirmed | done
+  createdAt        DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@map("action_items")
+}
+
+// ─── Meeting Requests ─────────────────────────────────────────────────────────
+
+model MeetingRequest {
+  id              String   @id
+  workspaceId     String
+  requesterId     String
+  requesterName   String
+  recipient       String
+  reason          String
+  durationMinutes Int      @default(30)
+  proposedStart   String
+  proposedEnd     String
+  status          String   @default("pending") // pending | accepted | rejected
+  comment         String   @default("")
+  createdAt       DateTime @default(now())
+
+  workspace  Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  requester  User      @relation(fields: [requesterId], references: [id], onDelete: Cascade)
+
+  @@map("meeting_requests")
+}
+
+// ─── Chat Sessions & Messages ─────────────────────────────────────────────────
+
+model ChatSession {
+  id          String   @id
+  workspaceId String
+  userId      String
+  title       String   @default("New Conversation")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages  ChatMessage[]
+
+  @@map("chat_sessions")
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  sessionId String
+  role      String   // user | assistant
+  content   String
+  images    Json?    // Array<{id, src, filename?}> stored as JSONB
+  metadata  Json?
+  timestamp DateTime @default(now())
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("chat_messages")
+}
+
+// ─── Calendar Events ──────────────────────────────────────────────────────────
+
+model CalendarEvent {
+  id          String   @id
+  workspaceId String
+  userId      String
+  summary     String
+  start       String
+  end         String
+  location    String   @default("")
+  description String   @default("")
+  meetLink    String   @default("")
+  attendees   String[] @default([])
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("calendar_events")
+}
+
+// ─── Tasks ────────────────────────────────────────────────────────────────────
+
+model Task {
+  id          String   @id
+  workspaceId String
+  userId      String
+  title       String
+  notes       String   @default("")
+  due         String?
+  isCompleted Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("tasks")
+}
+
+// ─── Notes ────────────────────────────────────────────────────────────────────
+
+model Note {
+  id          String   @id
+  workspaceId String
+  userId      String
+  title       String
+  content     String   @default("")
+  tags        String[] @default([])
+  source      String   @default("user")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notes")
+}
+
+// ─── Emails ───────────────────────────────────────────────────────────────────
+
+model Email {
+  id          String   @id
+  workspaceId String
+  userId      String
+  from        String
+  subject     String
+  snippet     String   @default("")
+  bodyText    String   @default("")
+  bodyHtml    String   @default("")
+  isUnread    Boolean  @default(true)
+  date        String
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("emails")
+}

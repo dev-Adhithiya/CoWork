@@ -20,6 +20,15 @@ export interface User {
   last_login?: string;
 }
 
+export interface ToolProposal {
+  id: string;
+  tool: string;
+  args: Record<string, any>;
+  status: 'pending' | 'confirmed' | 'cancelled';
+  integration?: string;
+  result?: any;
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -30,6 +39,7 @@ export interface ChatMessage {
     src: string;
     filename?: string;
   }>;
+  tool_proposal?: ToolProposal;
 }
 
 export interface ChatResponse {
@@ -41,6 +51,7 @@ export interface ChatResponse {
   error?: string;
   requires_confirmation?: boolean;
   pending_plan?: Record<string, any>;
+  tool_proposal?: ToolProposal;
 }
 
 export interface CalendarEvent {
@@ -164,11 +175,20 @@ export interface MeetingPrepItem {
 export type PriorityFeedItem = EmailActionItem | MeetingPrepItem;
 
 // Helpers
-function getAuthHeaders(): HeadersInit {
+export function getAuthHeaders(): HeadersInit {
   const token = localStorage.getItem('access_token');
   return {
     'Content-Type': 'application/json',
     ...(token && { Authorization: `Bearer ${token}` }),
+  };
+}
+
+export function getWorkspaceHeaders(workspaceId: string): Record<string, string> {
+  const token = localStorage.getItem('access_token');
+  return {
+    'Content-Type': 'application/json',
+    'x-workspace-id': workspaceId,
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
 }
 
@@ -319,6 +339,21 @@ export const chatAPI = {
   async getSessionMessages(sessionId: string): Promise<{ session_id: string; messages: ChatMessage[]; count: number }> {
     const response = await fetch(`${API_BASE_URL}/chat/sessions/${sessionId}`, {
       headers: getAuthHeaders(),
+    });
+    return handleResponse(response);
+  },
+
+  async confirmTool(params: {
+    session_id?: string | null;
+    tool_id: string;
+    action: 'confirm' | 'cancel';
+    tool: string;
+    args: any;
+  }): Promise<{ status: string; tool?: string; result?: any; message?: string }> {
+    const response = await fetch(`${API_BASE_URL}/chat/confirm-tool`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(params),
     });
     return handleResponse(response);
   },

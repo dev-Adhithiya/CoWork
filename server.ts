@@ -40,6 +40,35 @@ const currentUser = {
   last_login: now(),
 };
 
+type AppUser = typeof currentUser;
+const users = new Map<string, AppUser>([[currentUser.user_id, currentUser]]);
+const authTokens = new Map<string, string>();
+
+function userIdForEmail(email: string) {
+  return `user_${Buffer.from(email.trim().toLowerCase()).toString("base64url").slice(0, 32)}`;
+}
+
+function upsertUser(email: string, name: string, picture?: string): AppUser {
+  const normalizedEmail = email.trim().toLowerCase() || currentUser.email;
+  const userId = normalizedEmail === currentUser.email ? currentUser.user_id : userIdForEmail(normalizedEmail);
+  const existing = users.get(userId);
+  const user: AppUser = {
+    ...(existing || currentUser),
+    user_id: userId,
+    email: normalizedEmail,
+    name: name.trim() || existing?.name || normalizedEmail.split("@")[0],
+    picture: picture || existing?.picture || currentUser.picture,
+    last_login: now(),
+  };
+  users.set(userId, user);
+  return user;
+}
+
+function userFromToken(token: string | undefined): AppUser | undefined {
+  const userId = token ? authTokens.get(token) : undefined;
+  return userId ? users.get(userId) : undefined;
+}
+
 type WorkspaceRole = "owner" | "admin" | "member";
 type MentionType = "user" | "github";
 
@@ -131,6 +160,7 @@ interface ChatMessage {
   timestamp?: string;
   metadata?: Record<string, any>;
   images?: Array<{ id: string; src: string; filename?: string }>;
+  tool_proposal?: any;
 }
 
 interface ChatSession {
@@ -212,8 +242,24 @@ interface ActionItem {
 }
 
 interface AuthRequest extends Request {
-  user?: typeof currentUser;
+  user?: AppUser;
   workspace?: Workspace;
+}
+
+interface MeetingRequest {
+  id: string;
+  workspaceId: string;
+  requesterId: string;
+  requesterName: string;
+  recipient: string;
+  reason: string;
+  durationMinutes: number;
+  proposedStart: string;
+  proposedEnd: string;
+  status: "pending" | "accepted" | "rejected";
+  comment: string;
+  createdAt: string;
+  meet_link?: string;
 }
 
 const defaultWorkspaceId = `ws_personal_${currentUser.user_id}`;
@@ -237,6 +283,7 @@ let standupEntries: StandupEntry[] = [];
 let standupDigests: StandupDigest[] = [];
 let blockers: Blocker[] = [];
 let actionItems: ActionItem[] = [];
+let meetingRequests: MeetingRequest[] = [];
 const sessions: Map<string, ChatSession> = new Map();
 const githubCache = new Map<string, { expiresAt: number; data: GithubMentionData }>();
 
@@ -298,13 +345,17 @@ function isValidRepo(repo: string) {
 
 function resolveWorkspace(req: AuthRequest) {
   const workspaceId = (req.headers["x-workspace-id"] as string) || (req.query.workspaceId as string);
-  const memberWorkspaceIds = workspaceMembers.filter((m) => m.userId === currentUser.user_id).map((m) => m.workspaceId);
+  const memberWorkspaceIds = workspaceMembers.filter((m) => m.userId === req.user?.user_id).map((m) => m.workspaceId);
   const selected = workspaces.find((w) => w.id === workspaceId && memberWorkspaceIds.includes(w.id));
-  return selected || workspaces.find((w) => w.id === defaultWorkspaceId)!;
+  return selected || workspaces.find((w) => memberWorkspaceIds.includes(w.id)) || workspaces.find((w) => w.id === defaultWorkspaceId)!;
 }
 
-const authMiddleware = (req: AuthRequest, _res: Response, next: express.NextFunction) => {
-  req.user = currentUser;
+const authMiddleware = (req: AuthRequest, res: Response, next: express.NextFunction) => {
+  const authorization = String(req.headers.authorization || "");
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : undefined;
+  const user = userFromToken(token);
+  if (!user) return res.status(401).json({ error: "Authentication required" });
+  req.user = user;
   req.workspace = resolveWorkspace(req);
   next();
 };
@@ -371,20 +422,20 @@ function removeSocketFromPresence(socketId: string, workspaceId: string, broadca
   }
 }
 
-function enterRoom(socketId: string, workspaceId: string, roomId: string) {
+function enterRoom(socketId: string, workspaceId: string, roomId: string, user: AppUser) {
   const room = rooms.find((candidate) => candidate.id === roomId && candidate.workspaceId === workspaceId);
   if (!room) return null;
   removeSocketFromPresence(socketId, workspaceId, false);
   const occupants = roomPresence.get(roomId) || [];
-  const existing = occupants.find((occupant) => occupant.userId === currentUser.user_id);
+  const existing = occupants.find((occupant) => occupant.userId === user.user_id);
   if (existing) {
     existing.socketIds = Array.from(new Set([...existing.socketIds, socketId]));
   } else {
     occupants.push({
       roomId,
-      userId: currentUser.user_id,
-      userName: currentUser.name,
-      userPicture: currentUser.picture,
+      userId: user.user_id,
+      userName: user.name,
+      userPicture: user.picture,
       enteredAt: now(),
       socketIds: [socketId],
     });
@@ -600,8 +651,7 @@ function validateActionItemJson(value: any): value is { actionItems: Array<{ des
 }
 
 function memberNameForUser(workspaceId: string, userId: string) {
-  if (userId === currentUser.user_id) return currentUser.name;
-  return workspaceMembers.some((member) => member.workspaceId === workspaceId && member.userId === userId) ? userId : userId;
+  return users.get(userId)?.name || userId;
 }
 
 function matchWorkspaceMemberByName(workspaceId: string, ownerName: string | null) {
@@ -610,7 +660,7 @@ function matchWorkspaceMemberByName(workspaceId: string, ownerName: string | nul
   const members = workspaceMembers.filter((member) => member.workspaceId === workspaceId);
   const match = members.find((member) => member.userId.toLowerCase() === normalized || memberNameForUser(workspaceId, member.userId).toLowerCase().includes(normalized));
   if (match) return match.userId;
-  return currentUser.name.toLowerCase().includes(normalized) ? currentUser.user_id : null;
+  return Array.from(users.values()).find((user) => user.email.toLowerCase() === normalized || user.name.toLowerCase().includes(normalized))?.user_id || null;
 }
 
 async function generateJsonWithRetry<T>(prompt: string, validate: (value: any) => value is T) {
@@ -738,19 +788,29 @@ function githubContextForWorkspace(workspaceId: string) {
 }
 
 io.on("connection", (socket) => {
+  const token = String(socket.handshake.auth?.token || socket.handshake.query.token || "");
+  const user = userFromToken(token);
+  if (!user) {
+    socket.disconnect(true);
+    return;
+  }
   const workspaceId = String(socket.handshake.query.workspaceId || defaultWorkspaceId);
+  if (!workspaceMembers.some((member) => member.workspaceId === workspaceId && member.userId === user.user_id)) {
+    socket.disconnect(true);
+    return;
+  }
   socket.join(`workspace:${workspaceId}`);
-  socket.emit("presence:join", { workspaceId, userId: currentUser.user_id });
+  socket.emit("presence:join", { workspaceId, userId: user.user_id });
   socket.emit("room:presence", { event: "snapshot", rooms: roomSnapshot(workspaceId) });
 
   socket.on("channel:join", (channelId: string) => socket.join(`channel:${channelId}`));
   socket.on("channel:leave", (channelId: string) => socket.leave(`channel:${channelId}`));
-  socket.on("typing:start", (payload) => socket.to(`channel:${payload.channelId}`).emit("typing:start", { ...payload, userId: currentUser.user_id }));
-  socket.on("typing:stop", (payload) => socket.to(`channel:${payload.channelId}`).emit("typing:stop", { ...payload, userId: currentUser.user_id }));
-  socket.on("room:enter", ({ roomId }: { roomId: string }) => enterRoom(socket.id, workspaceId, roomId));
+  socket.on("typing:start", (payload) => socket.to(`channel:${payload.channelId}`).emit("typing:start", { ...payload, userId: user.user_id }));
+  socket.on("typing:stop", (payload) => socket.to(`channel:${payload.channelId}`).emit("typing:stop", { ...payload, userId: user.user_id }));
+  socket.on("room:enter", ({ roomId }: { roomId: string }) => enterRoom(socket.id, workspaceId, roomId, user));
   socket.on("room:leave", ({ roomId }: { roomId: string }) => leaveRoom(socket.id, workspaceId, roomId));
   socket.on("disconnect", () => {
-    io.to(`workspace:${workspaceId}`).emit("presence:leave", { workspaceId, userId: currentUser.user_id });
+    io.to(`workspace:${workspaceId}`).emit("presence:leave", { workspaceId, userId: user.user_id });
     const timerKey = `${workspaceId}:${socket.id}`;
     disconnectGraceTimers.set(timerKey, setTimeout(() => {
       removeSocketFromPresence(socket.id, workspaceId);
@@ -1029,6 +1089,67 @@ app.post("/api/workspaces/:id/schedule/suggestions", (req: AuthRequest, res) => 
   res.json({ suggestions, participants });
 });
 
+app.get("/api/workspaces/:id/meeting-requests", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  res.json({ requests: meetingRequests.filter((request) => request.workspaceId === req.params.id).reverse() });
+});
+
+app.post("/api/workspaces/:id/meeting-requests", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const recipient = String(req.body.recipient || "").trim();
+  const reason = String(req.body.reason || "").trim();
+  const proposedStart = String(req.body.proposedStart || "").trim();
+  const proposedEnd = String(req.body.proposedEnd || "").trim();
+  const durationMinutes = Number(req.body.durationMinutes || 30);
+  if (!recipient || !reason || !proposedStart || !proposedEnd) return res.status(400).json({ error: "Recipient, reason, and proposed time are required" });
+  const request: MeetingRequest = {
+    id: makeId("meeting_request"),
+    workspaceId: req.params.id,
+    requesterId: req.user!.user_id,
+    requesterName: req.user!.name,
+    recipient,
+    reason,
+    durationMinutes,
+    proposedStart,
+    proposedEnd,
+    status: "pending",
+    comment: "",
+    createdAt: now(),
+  };
+  meetingRequests.push(request);
+  res.status(201).json(request);
+});
+
+app.patch("/api/meeting-requests/:id", (req: AuthRequest, res) => {
+  const request = meetingRequests.find((candidate) => candidate.id === req.params.id && candidate.workspaceId === req.workspace?.id);
+  if (!request) return res.status(404).json({ error: "Meeting request not found" });
+  const status = String(req.body.status || request.status);
+  if (!["pending", "accepted", "rejected"].includes(status)) return res.status(400).json({ error: "Invalid request status" });
+  request.status = status as MeetingRequest["status"];
+  if (req.body.comment !== undefined) request.comment = String(req.body.comment).trim();
+
+  // Create Google Meet link and calendar event automatically when accepted
+  if (status === "accepted" && !request.meet_link) {
+    const meetCode = `${Math.random().toString(36).slice(2, 5)}-${Math.random().toString(36).slice(2, 6)}-${Math.random().toString(36).slice(2, 5)}`;
+    const meetLink = `https://meet.google.com/${meetCode}`;
+    request.meet_link = meetLink;
+    const event = {
+      id: makeId("evt"),
+      summary: `Meeting: ${request.reason || "Team Sync"}`,
+      start: request.proposedStart || now(),
+      end: request.proposedEnd || new Date(new Date(request.proposedStart || now()).getTime() + (request.durationMinutes || 30) * 60000).toISOString(),
+      location: "Google Meet",
+      description: `Accepted meeting request with ${request.recipient}. Reason: ${request.reason}`,
+      meet_link: meetLink,
+      attendees: [currentUser.email, request.recipient],
+      workspaceId: req.workspace!.id,
+    };
+    events.unshift(event);
+  }
+
+  res.json(request);
+});
+
 app.get("/api/workspaces/:id/members", (req: AuthRequest, res) => {
   if (!requireWorkspaceMembership(req, res)) return;
   res.json(workspaceMembers.filter((m) => m.workspaceId === req.params.id));
@@ -1197,14 +1318,30 @@ const handleLogin = (req: Request, res: Response) => {
   const token = `cowork_token_${Date.now()}`;
   const email = (req.body?.email as string) || (req.query?.email as string) || currentUser.email;
   const name = (req.body?.name as string) || (req.query?.name as string) || currentUser.name;
-  const user = { ...currentUser, email, name, last_login: now() };
+  const user = upsertUser(email, name);
+  if (!workspaceMembers.some((member) => member.workspaceId === defaultWorkspaceId && member.userId === user.user_id)) {
+    workspaceMembers.push({ workspaceId: defaultWorkspaceId, userId: user.user_id, role: "member", joinedAt: now() });
+    channelMembers.push({ channelId: defaultChannelId, userId: user.user_id, joinedAt: now() });
+  }
+  authTokens.set(token, user.user_id);
   res.json({ success: true, token, user, authorization_url: `/?auth_success=true#access_token=${token}&user=${encodeURIComponent(JSON.stringify(user))}`, state: "cowork_active_state" });
 };
 
 app.get("/auth/login", handleLogin);
 app.post("/auth/login", handleLogin);
-app.get("/auth/me", (_req, res) => res.json(currentUser));
-app.post("/auth/logout", (_req, res) => res.json({ status: "ok" }));
+app.get("/auth/me", (req, res) => {
+  const authorization = String(req.headers.authorization || "");
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : undefined;
+  const user = userFromToken(token);
+  if (!user) return res.status(401).json({ error: "Authentication required" });
+  res.json(user);
+});
+app.post("/auth/logout", (req, res) => {
+  const authorization = String(req.headers.authorization || "");
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7) : undefined;
+  if (token) authTokens.delete(token);
+  res.json({ status: "ok" });
+});
 
 app.post("/sessions", (req: AuthRequest, res) => {
   const sessionId = makeId("session");
@@ -1231,6 +1368,129 @@ app.get("/chat/sessions/:id", (req: AuthRequest, res) => {
   res.json({ session_id: session.session_id, messages: session.messages, count: session.messages.length });
 });
 
+const geminiTools = [
+  {
+    functionDeclarations: [
+      {
+        name: "send_email",
+        description: "Draft and prepare to send an email via Gmail. Requires user confirmation before sending.",
+        parameters: {
+          type: "OBJECT" as const,
+          properties: {
+            to: { type: "STRING" as const, description: "Recipient email address(es)" },
+            subject: { type: "STRING" as const, description: "Email subject line" },
+            body: { type: "STRING" as const, description: "Email body content" },
+            cc: { type: "STRING" as const, description: "Optional CC email addresses" },
+          },
+          required: ["to", "subject", "body"],
+        },
+      },
+      {
+        name: "create_calendar_event",
+        description: "Schedule a calendar event or meeting with an optional Google Meet link. Requires user confirmation before creation.",
+        parameters: {
+          type: "OBJECT" as const,
+          properties: {
+            summary: { type: "STRING" as const, description: "Title of the calendar event or meeting" },
+            start_time: { type: "STRING" as const, description: "Start time (ISO string or readable date/time)" },
+            end_time: { type: "STRING" as const, description: "End time (ISO string or readable date/time)" },
+            description: { type: "STRING" as const, description: "Meeting description or agenda" },
+            attendees: { type: "ARRAY" as const, items: { type: "STRING" as const }, description: "Attendee email addresses" },
+            add_google_meet: { type: "BOOLEAN" as const, description: "Whether to create a Google Meet conference link (default true)" },
+          },
+          required: ["summary", "start_time"],
+        },
+      },
+    ],
+  },
+];
+
+function extractActionIntent(text: string): { tool: string; args: any } | null {
+  const lower = text.toLowerCase();
+
+  // 1. Email detection
+  const isEmailIntent =
+    lower.includes("send email") ||
+    lower.includes("send an email") ||
+    lower.startsWith("email ") ||
+    lower.includes("compose email") ||
+    lower.includes("write an email");
+
+  if (isEmailIntent) {
+    const directEmailMatch = text.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+    const personMatch = text.match(/(?:to|emailing)\s+([A-Za-z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|[A-Za-z]+(?:\s+[A-Za-z]+)?)/i);
+    let to = directEmailMatch ? directEmailMatch[1] : (personMatch ? personMatch[1].trim() : "sarah.chen@techcorp.io");
+    if (!to.includes("@")) to = `${to.toLowerCase().replace(/\s+/g, ".")}@techcorp.io`;
+
+    let subject = "Workspace Update & Follow-up";
+    if (lower.includes("about ")) {
+      const parts = text.split(/about /i)[1]?.split(/[.\n,;]/);
+      if (parts && parts[0]?.trim()) subject = parts[0].trim();
+    } else if (lower.includes("subject: ")) {
+      subject = text.split(/subject:\s*/i)[1]?.split(/[.\n]/)[0]?.trim() || subject;
+    }
+
+    let body = "Hi,\n\nFollowing up regarding our workspace discussions.\n\nBest,\nAdhithiya";
+    if (lower.includes("saying ")) {
+      body = text.split(/saying /i)[1]?.trim() || body;
+    } else if (lower.includes("that ")) {
+      body = text.split(/that /i)[1]?.trim() || body;
+    }
+
+    return {
+      tool: "send_email",
+      args: { to, subject, body },
+    };
+  }
+
+  // 2. Calendar / Google Meet detection
+  const isCalendarIntent =
+    lower.includes("schedule") ||
+    lower.includes("meeting") ||
+    lower.includes("calendar event") ||
+    lower.includes("google meet") ||
+    lower.includes("meet link") ||
+    lower.includes("set up a sync") ||
+    lower.includes("sync with");
+
+  if (isCalendarIntent) {
+    let summary = "Executive Sync & Review";
+    if (lower.includes("standup")) summary = "Daily Team Standup";
+    else if (lower.includes("sprint")) summary = "Sprint Planning & Review";
+    else if (lower.includes("design")) summary = "Design System Review";
+    else if (lower.includes("sync with")) {
+      const match = text.match(/sync with\s+([A-Za-z0-9\s]+?)(?:\s+at|\s+tomorrow|\s+today|\.|$)/i);
+      if (match) summary = `Sync with ${match[1].trim()}`;
+    }
+
+    const emailMatch = text.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+    const personMatch = text.match(/(?:with|invite)\s+([A-Za-z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|[A-Za-z]+(?:\s+[A-Za-z]+)?)/i);
+    let attendee = emailMatch ? emailMatch[1] : (personMatch ? personMatch[1].trim() : "sarah.chen@techcorp.io");
+    if (!attendee.includes("@")) attendee = `${attendee.toLowerCase().replace(/\s+/g, ".")}@techcorp.io`;
+
+    let start = new Date(Date.now() + 86400000);
+    start.setHours(10, 0, 0, 0);
+    if (lower.includes("today")) {
+      start = new Date(Date.now() + 7200000);
+    }
+    const end = new Date(start.getTime() + 30 * 60000);
+
+    return {
+      tool: "create_calendar_event",
+      args: {
+        summary,
+        start_time: start.toISOString(),
+        end_time: end.toISOString(),
+        description: `Scheduled via Co-Work AI Assistant with ${attendee}. Google Meet video conference attached.`,
+        attendees: [currentUser.email, attendee],
+        add_google_meet: true,
+      },
+    };
+  }
+
+  return null;
+}
+
 app.post("/chat", upload.any(), async (req: AuthRequest, res) => {
   const message = req.body.message || "";
   let sessionId = req.body.session_id;
@@ -1242,21 +1502,172 @@ app.post("/chat", upload.any(), async (req: AuthRequest, res) => {
   session.messages.push({ role: "user", content: message, timestamp: now() });
   session.updated_at = now();
   const githubContext = githubContextForWorkspace(req.workspace!.id);
+
   let replyText = "I have received your request and processed it across your workspace.";
+  let toolProposal: any = null;
+
   const ai = getGemini();
   if (ai) {
     try {
-      const promptContext = `You are Co-Work, a concise workspace assistant. Current workspace: ${req.workspace!.name}. Recent resolved GitHub mentions: ${JSON.stringify(githubContext)}. Pending tasks: ${getWorkspaceScoped(tasks, req).filter((t) => !t.is_completed).map((t) => t.title).join(", ")}.`;
+      const promptContext = `You are Co-Work, a proactive Chief of Staff AI assistant. Current workspace: ${req.workspace!.name}. Recent resolved GitHub mentions: ${JSON.stringify(githubContext)}. Pending tasks: ${getWorkspaceScoped(tasks, req).filter((t) => !t.is_completed).map((t) => t.title).join(", ")}. When the user wants to send an email or schedule a meeting/calendar event with Google Meet, call the corresponding tool.`;
       const contents = session.messages.slice(-8).map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] }));
-      const result = await ai.models.generateContent({ model: "gemini-3.1-pro-preview", contents, config: { systemInstruction: promptContext } });
-      replyText = result.text || replyText;
+      const result = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents,
+        config: {
+          systemInstruction: promptContext,
+          tools: geminiTools,
+        },
+      });
+
+      const calls = (result as any).functionCalls;
+      if (calls && calls.length > 0) {
+        const call = calls[0];
+        toolProposal = {
+          id: makeId("tool"),
+          tool: call.name,
+          args: call.args,
+          status: "pending",
+          integration: "mock_demo_mode",
+        };
+        if (call.name === "send_email") {
+          replyText = `I have drafted an email for **${call.args.to}**. Please review the details below and confirm to send.`;
+        } else if (call.name === "create_calendar_event") {
+          replyText = `I have set up the calendar event **${call.args.summary}** with a Google Meet conference link. Please review the details below and confirm.`;
+        }
+      } else {
+        replyText = result.text || replyText;
+      }
     } catch (err) {
-      console.error("Gemini API call failed:", err);
-      replyText = "Error: Failed to generate a response from the AI model. Please check your API key and model availability.";
+      console.error("Gemini API call failed, using intelligent fallback parser:", err);
     }
   }
-  session.messages.push({ role: "assistant", content: replyText, timestamp: now(), metadata: { githubContext } });
-  res.json({ response: replyText, session_id: sessionId, suggestions: ["Review today's schedule", "Check unread emails", "Add a high-priority task"], execution_success: true });
+
+  // Fallback intent extraction if Gemini was not available or didn't return a function call
+  if (!toolProposal) {
+    const detected = extractActionIntent(message);
+    if (detected) {
+      toolProposal = {
+        id: makeId("tool"),
+        tool: detected.tool,
+        args: detected.args,
+        status: "pending",
+        integration: "mock_demo_mode",
+      };
+      if (detected.tool === "send_email") {
+        replyText = `I have prepared the email draft to **${detected.args.to}**. Please review the confirmation preview below before sending.`;
+      } else if (detected.tool === "create_calendar_event") {
+        replyText = `I have prepared the meeting invitation for **${detected.args.summary}** with Google Meet attached. Please confirm below to schedule.`;
+      }
+    }
+  }
+
+  const assistantMsg: ChatMessage = {
+    role: "assistant",
+    content: replyText,
+    timestamp: now(),
+    metadata: { githubContext },
+    tool_proposal: toolProposal,
+  };
+  session.messages.push(assistantMsg);
+
+  res.json({
+    response: replyText,
+    session_id: sessionId,
+    tool_proposal: toolProposal,
+    requires_confirmation: !!toolProposal,
+    suggestions: ["Review today's schedule", "Check unread emails", "Add a high-priority task"],
+    execution_success: true,
+  });
+});
+
+app.post("/chat/confirm-tool", (req: AuthRequest, res) => {
+  const { session_id, tool_id, action, tool, args } = req.body;
+  const session = session_id ? sessions.get(session_id) : undefined;
+
+  if (action === "cancel") {
+    if (session) {
+      session.messages.push({
+        role: "assistant",
+        content: `Action cancelled by user. No emails or calendar events were created.`,
+        timestamp: now(),
+      });
+    }
+    return res.json({ status: "cancelled", message: "Action cancelled by user." });
+  }
+
+  if (action === "confirm") {
+    let result: any = {};
+
+    if (tool === "send_email") {
+      const recipients = Array.isArray(args.to) ? args.to : [String(args.to || currentUser.email)];
+      const email = {
+        id: makeId("mail"),
+        from: `${currentUser.name} <${currentUser.email}>`,
+        subject: args.subject || "No Subject",
+        snippet: String(args.body || "").slice(0, 80),
+        body_text: args.body || "",
+        body_html: `<p>${String(args.body || "").replace(/\n/g, "<br/>")}</p>`,
+        is_unread: false,
+        date: now(),
+        workspaceId: req.workspace!.id,
+      };
+      emails.unshift(email);
+      result = {
+        id: email.id,
+        to: recipients,
+        subject: email.subject,
+        message: `Email sent to ${recipients.join(", ")} successfully! (Workspace Simulation Mode)`,
+      };
+      if (session) {
+        session.messages.push({
+          role: "assistant",
+          content: `✅ **Email Sent**: Successfully sent "${email.subject}" to ${recipients.join(", ")}.`,
+          timestamp: now(),
+        });
+      }
+    } else if (tool === "create_calendar_event" || tool === "schedule_meeting_with_meet") {
+      const meetCode = `${Math.random().toString(36).slice(2, 5)}-${Math.random().toString(36).slice(2, 6)}-${Math.random().toString(36).slice(2, 5)}`;
+      const meetLink = `https://meet.google.com/${meetCode}`;
+      const summary = args.summary || args.title || "Team Meeting";
+      const start = args.start_time || now();
+      const end = args.end_time || new Date(new Date(start).getTime() + 30 * 60000).toISOString();
+      const attendees = args.attendees || (args.recipient ? [currentUser.email, args.recipient] : [currentUser.email]);
+
+      const event = {
+        id: makeId("evt"),
+        summary,
+        start,
+        end,
+        location: "Google Meet",
+        description: args.description || args.reason || "Scheduled via Co-Work AI Assistant",
+        meet_link: meetLink,
+        attendees: Array.isArray(attendees) ? attendees : [attendees],
+        workspaceId: req.workspace!.id,
+      };
+      events.unshift(event);
+      result = {
+        id: event.id,
+        summary: event.summary,
+        start: event.start,
+        end: event.end,
+        meet_link: meetLink,
+        attendees: event.attendees,
+        message: `Meeting "${event.summary}" scheduled with Google Meet link: ${meetLink}`,
+      };
+      if (session) {
+        session.messages.push({
+          role: "assistant",
+          content: `✅ **Calendar Event Created**: "${event.summary}" scheduled for ${new Date(event.start).toLocaleString()}.\n\n📹 **Google Meet**: [${meetLink}](${meetLink})`,
+          timestamp: now(),
+        });
+      }
+    }
+
+    return res.json({ status: "executed", tool, result });
+  }
+
+  res.status(400).json({ error: "Invalid action type" });
 });
 
 app.get("/calendar/events", (req: AuthRequest, res) => {

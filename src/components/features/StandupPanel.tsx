@@ -1,5 +1,8 @@
 import { FormEvent, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { ClipboardList, Wand2 } from 'lucide-react';
+import { AiSuggestedBadge } from '../ui/OriginBadge';
+import { getAuthHeaders, getWorkspaceHeaders } from '../../lib/api';
 
 interface Workspace {
   id: string;
@@ -19,19 +22,20 @@ export function StandupPanel() {
   const [content, setContent] = useState('');
   const [digest, setDigest] = useState<StandupDigest | null>(null);
   const [status, setStatus] = useState('');
+  const [tab, setTab] = useState<'submit' | 'digest'>('submit');
   const today = new Date().toISOString().slice(0, 10);
 
-  const headers: Record<string, string> = workspace ? { 'Content-Type': 'application/json', 'x-workspace-id': workspace.id } : { 'Content-Type': 'application/json' };
+  const headers: HeadersInit = workspace ? getWorkspaceHeaders(workspace.id) : getAuthHeaders();
 
   const loadDigest = (workspaceId: string) => {
-    fetch(`/api/workspaces/${workspaceId}/standup-digests?date=${today}`, { headers: { 'x-workspace-id': workspaceId } })
+    fetch(`/api/workspaces/${workspaceId}/standup-digests?date=${today}`, { headers: getWorkspaceHeaders(workspaceId) })
       .then((response) => response.json())
       .then((data) => setDigest(data.digests?.[0] || null))
       .catch(() => setDigest(null));
   };
 
   useEffect(() => {
-    fetch('/api/workspaces')
+    fetch('/api/workspaces', { headers: getAuthHeaders() })
       .then((response) => response.json())
       .then((items: Workspace[]) => {
         const selected = items[0] || null;
@@ -68,12 +72,16 @@ export function StandupPanel() {
   };
 
   return (
-    <div className="glass-subtle p-4 text-sm text-white/75">
-      <div className="flex items-center gap-2 mb-3">
+    <div className="rounded-2xl border border-emerald-300/15 bg-emerald-950/10 p-5 text-sm text-white/75">
+      <div className="mb-4 flex items-center gap-2">
         <ClipboardList className="w-4 h-4 text-emerald-300" />
         <span className="font-semibold text-white/85">Standup</span>
       </div>
-      <form onSubmit={submitEntry} className="space-y-2">
+      <div className="mb-4 grid grid-cols-2 gap-1 rounded-lg border border-white/10 bg-black/10 p-1">
+        <button onClick={() => setTab('submit')} className={`rounded-md px-3 py-2 text-xs ${tab === 'submit' ? 'bg-emerald-400/15 text-emerald-100' : 'text-white/45'}`}>Submit today’s update</button>
+        <button onClick={() => setTab('digest')} className={`rounded-md px-3 py-2 text-xs ${tab === 'digest' ? 'bg-emerald-400/15 text-emerald-100' : 'text-white/45'}`}>Today’s digest</button>
+      </div>
+      {tab === 'submit' ? <form onSubmit={submitEntry} className="space-y-2">
         <textarea
           value={content}
           onChange={(event) => setContent(event.target.value)}
@@ -88,9 +96,15 @@ export function StandupPanel() {
             <Wand2 className="w-4 h-4" />
           </button>
         </div>
-      </form>
+      </form> : (
+        <div className="rounded-xl border border-dashed border-violet-300/30 bg-violet-400/5 p-4">
+          <div className="mb-2 flex items-center justify-between"><span className="text-xs font-semibold text-white/75">Merged team update</span><AiSuggestedBadge /></div>
+          <p className="text-xs leading-relaxed whitespace-pre-wrap">{digest?.mergedSummary || 'Generate today’s digest after the team has submitted updates.'}</p>
+          {digest && <Link to="/blockers" className="mt-3 inline-block text-[11px] text-amber-200 underline decoration-amber-300/30 underline-offset-2">Review extracted blockers</Link>}
+        </div>
+      )}
       {status && <div className="mt-2 text-[11px] text-white/45">{status}</div>}
-      {digest && (
+      {digest && tab === 'submit' && (
         <div className="mt-3 border-t border-white/10 pt-3">
           <div className="mb-1 text-[11px] text-white/40">
             {digest.status === 'ai-generated' ? 'AI-assisted suggested digest' : 'Fallback digest'} · {new Date(digest.generatedAt).toLocaleTimeString()}

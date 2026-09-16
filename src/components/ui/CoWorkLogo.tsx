@@ -5,7 +5,6 @@ interface CoWorkLogoProps {
   size?: 'sm' | 'md' | 'lg' | 'xl' | '2xl';
   variant?: 'full' | 'icon';
   layout?: 'horizontal' | 'stacked';
-  textClassName?: string;
 }
 
 export const CoWorkLogo: React.FC<CoWorkLogoProps> = ({
@@ -13,7 +12,6 @@ export const CoWorkLogo: React.FC<CoWorkLogoProps> = ({
   size = 'md',
   variant = 'full',
   layout = 'horizontal',
-  textClassName = '',
 }) => {
   const iconDimensions = {
     sm: { width: 26, height: 16 },
@@ -21,14 +19,6 @@ export const CoWorkLogo: React.FC<CoWorkLogoProps> = ({
     lg: { width: 56, height: 34 },
     xl: { width: 88, height: 54 },
     '2xl': { width: 140, height: 86 },
-  }[size];
-
-  const textSizes = {
-    sm: 'text-sm font-bold tracking-tight',
-    md: 'text-lg font-bold tracking-tight',
-    lg: 'text-2xl font-bold tracking-tight',
-    xl: 'text-3xl font-extrabold tracking-tight',
-    '2xl': 'text-5xl font-extrabold tracking-tight',
   }[size];
 
   const isStacked = layout === 'stacked';
@@ -43,23 +33,15 @@ export const CoWorkLogo: React.FC<CoWorkLogoProps> = ({
       <img
         src="/logo.png"
         alt="Co-Work Logo"
-        width={iconDimensions.width * 1.5}
-        height={iconDimensions.height * 1.5}
-        className="flex-shrink-0 transition-transform duration-300 hover:scale-105 object-contain"
+        width={iconDimensions.width * (variant === 'full' ? 2.6 : 1.5)}
+        height={iconDimensions.height * (variant === 'full' ? 2.6 : 1.5)}
+        className="flex-shrink-0 max-w-full transition-transform duration-300 hover:scale-105 object-contain"
         onError={(e) => {
           // Fallback if user hasn't uploaded logo.png yet
           (e.target as HTMLImageElement).style.display = 'none';
         }}
       />
 
-      {/* Wordmark: "co work" (bold lowercase) */}
-      {variant === 'full' && (
-        <span
-          className={`font-sans ${textSizes} tracking-tight text-[#0F172A] dark:text-white transition-colors duration-200 ${textClassName}`}
-        >
-          co work
-        </span>
-      )}
     </div>
   );
 };

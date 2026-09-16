@@ -6,26 +6,44 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useChat } from '../../contexts/ChatContext';
 import { useSettings } from '../../contexts/SettingsContext';
 import { chatAPI } from '../../lib/api';
+import { getAuthHeaders, getWorkspaceHeaders } from '../../lib/api';
 import { SettingsPanel, type Connection } from './SettingsPanel';
 import { CoWorkLogo } from '../ui/CoWorkLogo';
+import { NavLink, useNavigate } from 'react-router-dom';
 import {
+  AlertTriangle,
+  CalendarClock,
+  CheckSquare,
+  ClipboardList,
+  DoorOpen,
+  FileText,
+  Calendar,
   LogOut,
+  MessageSquare,
   Settings,
   MessageSquarePlus,
   User,
   Mail,
-  Calendar,
-  CheckSquare,
   StickyNote,
   PanelLeftClose,
   PanelLeft,
-  MessageSquare,
   Clock,
   Trash2,
 } from 'lucide-react';
 
+const primaryNavigation = [
+  { to: '/chat/ai', label: 'Chat', icon: MessageSquare },
+  { to: '/rooms', label: 'Rooms / Presence', icon: DoorOpen },
+  { to: '/meetings', label: 'Meetings', icon: FileText },
+  { to: '/standups', label: 'Standups', icon: ClipboardList },
+  { to: '/blockers', label: 'Blockers', icon: AlertTriangle },
+  { to: '/action-items', label: 'Action items', icon: CheckSquare },
+  { to: '/scheduling', label: 'Scheduling', icon: CalendarClock },
+];
+
 export function Sidebar() {
   const { user, isAuthenticated, logout } = useAuth();
+  const navigate = useNavigate();
   const { createNewSession, sessionId, loadSession } = useChat();
   const { speakMode, setSpeakMode, isDarkMode, setIsDarkMode } = useSettings();
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -35,6 +53,9 @@ export function Sidebar() {
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [profileImageFailed, setProfileImageFailed] = useState(false);
+  const [showDirectMessage, setShowDirectMessage] = useState(false);
+  const [personQuery, setPersonQuery] = useState('');
+  const [directMessageStatus, setDirectMessageStatus] = useState('');
   const [connections, setConnections] = useState<Connection[]>([
     { id: 'gmail', name: 'Gmail', icon: <Mail className="w-4 h-4" />, enabled: true },
     { id: 'calendar', name: 'Calendar', icon: <Calendar className="w-4 h-4" />, enabled: true },
@@ -70,6 +91,37 @@ export function Sidebar() {
     setConnections(prev => prev.map(conn =>
       conn.id === id ? { ...conn, enabled } : conn
     ));
+  };
+
+  const startDirectMessage = async () => {
+    const recipient = personQuery.trim();
+    if (!recipient) return;
+    setDirectMessageStatus('Creating conversation...');
+    try {
+      const workspacesResponse = await fetch('/api/workspaces', { headers: getAuthHeaders() });
+      const workspaces = await workspacesResponse.json();
+      const workspace = workspaces[0];
+      if (!workspace) throw new Error('No workspace is available.');
+      const headers = getWorkspaceHeaders(workspace.id);
+      const channelResponse = await fetch(`/api/workspaces/${workspace.id}/channels`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ name: `Direct · ${recipient}`, linkedGithubRepo: null }),
+      });
+      if (!channelResponse.ok) throw new Error('Could not create the conversation.');
+      const channel = await channelResponse.json();
+      await fetch(`/api/channels/${channel.id}/members`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ userId: recipient }),
+      });
+      setPersonQuery('');
+      setShowDirectMessage(false);
+      setDirectMessageStatus('');
+      navigate(`/chat/${channel.id}`);
+    } catch (error) {
+      setDirectMessageStatus(error instanceof Error ? error.message : 'Could not start conversation.');
+    }
   };
 
   const handleSelectSession = async (targetSessionId: string) => {
@@ -146,6 +198,16 @@ export function Sidebar() {
             >
               <Settings className="w-5 h-5 text-white/60" />
             </button>
+            <button onClick={logout} className="rounded-lg p-2 text-white/50 transition-colors hover:bg-red-400/10 hover:text-red-300" title="Sign out">
+              <LogOut className="h-5 w-5" />
+            </button>
+            <div className="mt-2 flex flex-col gap-1 border-t border-white/10 pt-2">
+              {primaryNavigation.map(({ to, label, icon: Icon }) => (
+                <NavLink key={to} to={to} className={({ isActive }) => `rounded-lg p-2 transition-colors ${isActive ? 'bg-blue-500/20 text-blue-200' : 'text-white/50 hover:bg-white/10 hover:text-white'}`} title={label}>
+                  <Icon className="h-5 w-5" />
+                </NavLink>
+              ))}
+            </div>
           </>
         )}
       </GlassPanel>
@@ -205,11 +267,42 @@ export function Sidebar() {
                 <MessageSquarePlus className="w-4 h-4 mr-2" />
                 New Chat
               </GlassButton>
+              <GlassButton variant="ghost" size="md" onClick={() => setShowDirectMessage((value) => !value)} className="w-full justify-start">
+                <User className="mr-2 h-4 w-4" />
+                Message someone
+              </GlassButton>
+              {showDirectMessage && (
+                <div className="rounded-xl border border-blue-300/20 bg-blue-500/5 p-3">
+                  <label className="mb-2 block text-[11px] text-white/50">Username or email</label>
+                  <input value={personQuery} onChange={(event) => setPersonQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') startDirectMessage(); }} placeholder="alex@example.com" className="mb-2 w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-white placeholder-white/35 focus:outline-none focus:ring-1 focus:ring-blue-400/50" />
+                  <button onClick={startDirectMessage} disabled={!personQuery.trim()} className="w-full rounded-lg bg-blue-500/20 px-3 py-2 text-xs text-blue-100 disabled:opacity-40">Start conversation</button>
+                  {directMessageStatus && <p className="mt-2 text-[10px] text-white/45">{directMessageStatus}</p>}
+                </div>
+              )}
 
 
             </>
           )}
         </div>
+
+        {/* Primary workspace navigation */}
+        {isAuthenticated && (
+          <nav className="px-4 pb-4" aria-label="Primary navigation">
+            <div className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/35">Workspace</div>
+            <div className="space-y-1">
+              {primaryNavigation.map(({ to, label, icon: Icon }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  className={({ isActive }) => `flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${isActive ? 'bg-blue-500/20 text-blue-100' : 'text-white/60 hover:bg-white/10 hover:text-white'}`}
+                >
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span>{label}</span>
+                </NavLink>
+              ))}
+            </div>
+          </nav>
+        )}
 
         {/* Chat History */}
         {isAuthenticated && (
@@ -235,9 +328,14 @@ export function Sidebar() {
             ) : chatHistory.length > 0 ? (
               <div className="flex-1 overflow-y-auto space-y-1 pr-1">
                 {chatHistory.map((session) => (
-                  <motion.button
+                  <motion.div
                     key={session.session_id}
                     onClick={() => handleSelectSession(session.session_id)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') handleSelectSession(session.session_id);
+                    }}
                     className={`
                       w-full text-left p-2.5 rounded-lg transition-all
                       ${session.session_id === sessionId 
@@ -287,7 +385,7 @@ export function Sidebar() {
                         </div>
                       </div>
                     </div>
-                  </motion.button>
+                  </motion.div>
                 ))}
               </div>
             ) : (

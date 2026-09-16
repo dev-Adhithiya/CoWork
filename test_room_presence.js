@@ -30,12 +30,13 @@ async function waitFor(socket, eventName, predicate) {
 }
 
 async function main() {
+  const login = await request("/auth/login", { method: "POST", body: { name: "Presence Tester", email: "presence@example.com" } });
   const created = await request("/api/workspaces", { method: "POST", body: { name: "Presence Test" } });
   const workspaceId = created.workspace.id;
   const rooms = await request(`/api/workspaces/${workspaceId}/rooms`, { workspaceId });
   const room = rooms[0];
 
-  const socket = io(base, { query: { workspaceId } });
+  const socket = io(base, { query: { workspaceId }, auth: { token: login.token } });
   await waitFor(socket, "connect");
   socket.emit("room:enter", { roomId: room.id });
   await waitFor(socket, "room:presence", (payload) => payload.rooms?.some((item) => item.id === room.id && item.occupants?.length === 1));
