@@ -33,9 +33,9 @@ export function ChatInterface() {
   }
 
   return (
-    <GlassPanel className="flex-1 flex flex-col overflow-hidden">
+    <GlassPanel className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* Chat Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+      <div className="flex shrink-0 items-center justify-between border-b border-white/10 px-4 py-3">
         <div className="flex items-center gap-3">
           <CoWorkLogo size="sm" variant="icon" />
           <div>
@@ -53,7 +53,9 @@ export function ChatInterface() {
       <MessageList />
 
       {/* Input Area */}
-      <InputArea />
+      <div className="shrink-0">
+        <InputArea />
+      </div>
     </GlassPanel>
   );
 }
