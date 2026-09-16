@@ -1,0 +1,6 @@
+{
+  "name": "Co-Work",
+  "description": "Intelligent AI workspace assistant and Chief of Staff with Google Workspace integration",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
