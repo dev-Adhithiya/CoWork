@@ -1,82 +1,91 @@
-# Co-Work - Complete Integration Guide
+# Co-Work - Integration & Deployment Guide
 
-## 🎯 Overview
+## 🎯 Architecture & Deployment Overview
 
-Co-Work is an AI-powered collaboration and productivity workspace. Here is how to configure and deploy the application:
+Co-Work operates as a unified, full-stack application binding together Google Gemini AI, Firebase services, and Express with Vite.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    CO-WORK WORKSPACE                        │
+│                    CO-WORK INTEGRATION                      │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  Step 1: Configure Environment Variables                    │
+│   Step 1: Configure Environment (.env)                      │
 │              ↓                                              │
-│  Step 2: Install Node Dependencies                          │
+│   Step 2: Install Dependencies (npm install)                │
 │              ↓                                              │
-│  Step 3: Run Locally (npm run dev)                          │
+│   Step 3: Run Locally (npm run dev on Port 3000)            │
 │              ↓                                              │
-│  Step 4: Build & Deploy (npm run build)                     │
+│   Step 4: Build for Production (npm run build)              │
 │              ↓                                              │
-│     ✨ Live Co-Work Application ✨                          │
+│   Step 5: Deploy to Cloud Run / Docker Container            │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 📋 Prerequisites
+## 🔧 1. Environment Configuration
 
-- **Node.js 18+**
-- **Google Gemini API Key** (from Google AI Studio)
-- **Google Cloud Platform Project** (for OAuth & optional Cloud Run deployment)
-
----
-
-## 🔧 Step 1: Environment Variables
-
-Create or update `.env`:
+Create a `.env` file in your root workspace:
 
 ```env
-# Required for AI Features
-GEMINI_API_KEY=your_gemini_api_key_here
+# Google Gemini API Key
+GEMINI_API_KEY=AIzaSy...
 
-# Optional: Port and Host (default is 3000)
+# Application Port (Port 3000 is required in container environments)
 PORT=3000
 ```
 
 ---
 
-## 💻 Step 2: Running Locally
+## 💻 2. Local Execution
 
 ```bash
 # Install packages
 npm install
 
-# Start development server
+# Run unified full-stack development server
 npm run dev
 ```
 
-Open your browser at `http://localhost:3000`.
+The application will be accessible at `http://localhost:3000`.
 
 ---
 
-## 🚀 Step 3: Deployment Options
+## 🚀 3. Container & Cloud Run Deployment
 
-### Option A: GitHub Pages (Client-Side Preview)
-The included GitHub Actions workflow in `.github/workflows/deploy.yml` automatically builds and publishes the production `dist/` directory on pushes to the `main` branch.
+Co-Work includes production build scripts that bundle both the client SPA and the Express backend:
 
-### Option B: Cloud Run Container Deployment
-Build and deploy the full-stack container using Google Cloud SDK:
+### Build Command:
+```bash
+npm run build
+```
+This executes:
+1. `vite build`: Compiles React assets into `/dist`
+2. `esbuild server.ts`: Bundles the Express backend into `dist/server.cjs`
 
+### Start Command:
+```bash
+npm start
+```
+Runs `node dist/server.cjs` which serves both API endpoints and the compiled single-page application on port 3000.
+
+### Google Cloud Run Deployment:
 ```bash
 gcloud builds submit --tag gcr.io/$GCP_PROJECT_ID/co-work
-gcloud run deploy co-work --image gcr.io/$GCP_PROJECT_ID/co-work --region us-central1 --port 3000
+gcloud run deploy co-work \
+  --image gcr.io/$GCP_PROJECT_ID/co-work \
+  --platform managed \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --port 3000 \
+  --set-env-vars GEMINI_API_KEY=$GEMINI_API_KEY
 ```
 
 ---
 
-## 🧠 How Co-Work Works
+## 🔐 4. Authentication Integration
 
-1. **Context & State Management**: Real-time React context maintains chat dialogue, voice state, user settings, and workspace data.
-2. **AI Chief of Staff Engine**: Uses Google Gemini models with structured prompts to generate briefings, summarize agendas, draft email responses, and manage tasks.
-3. **Ergonomic Workspace Layout**: Designed for single-screen focus with collapsible utility sidebars, quick task triage, and an interactive command bar.
+Co-Work supports dual-mode authentication:
+1. **Firebase Authentication (Google OAuth)**: Users can sign in with their Google accounts.
+2. **Seamless Workspace Fallback**: When running inside sandboxed iframes or environments where popups are restricted, Co-Work gracefully falls back to instant workspace session authentication without throwing errors or blocking users.

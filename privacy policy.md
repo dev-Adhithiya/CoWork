@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Last updated: April 7, 2026
+Last updated: September 16, 2026
 
 This Privacy Policy explains how Co-Work ("we," "us," or "our") collects, uses, stores, and protects personal information when you use the Co-Work workspace assistant application and related services (the "Service").
 
@@ -10,7 +10,7 @@ By using the Service, you agree to this Privacy Policy.
 
 We may collect the following categories of information:
 
-- Account and profile information: name, email address, and account identifiers obtained during Google OAuth sign-in.
+- Account and profile information: name, email address, and account identifiers obtained during Google OAuth or direct workspace sign-in.
 - Connected service data: data you authorize us to access from Google Workspace APIs, such as Gmail metadata/content, Calendar events, Google Tasks items, and notes saved through the Service.
 - Conversation and usage data: chat messages, request payloads, generated responses, and interaction metadata used to provide and improve the Service.
 - Technical information: IP address, browser type, device details, logs, error traces, and performance telemetry.
@@ -39,8 +39,8 @@ Depending on your jurisdiction, we process personal data under one or more legal
 
 We do not sell your personal information. We may share information with:
 
-- Service providers and subprocessors that help us operate the Service (for hosting, infrastructure, logging, and AI processing).
-- Integrated platforms you explicitly authorize (for example, Google APIs).
+- Service providers and subprocessors that help us operate the Service (for hosting, infrastructure, logging, and AI processing via Google GenAI).
+- Integrated platforms you explicitly authorize (for example, Google APIs and Firebase).
 - Legal or regulatory authorities when required by law or to protect rights, safety, and security.
 - Successors in connection with a merger, acquisition, financing, or asset sale.
 
@@ -88,4 +88,3 @@ For privacy questions or requests, contact:
 - Product: Co-Work
 - Email: askadhithiya@gmail.com
 
-If you are using this policy in production, replace the contact details above with your official support channel.

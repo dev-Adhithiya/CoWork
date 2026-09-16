@@ -1,6 +1,6 @@
 # Terms of Service
 
-Last updated: April 7, 2026
+Last updated: September 16, 2026
 
 These Terms of Service ("Terms") govern your access to and use of Co-Work and related services (the "Service") provided by Co-Work ("we," "us," or "our").
 
@@ -86,5 +86,3 @@ For questions about these Terms, contact:
 
 - Product: Co-Work
 - Email: askadhithiya@gmail.com
-
-If you are using these terms in production, replace the contact details above with your official legal/support channel.

@@ -1,27 +1,29 @@
 # Co-Work - URL & Access Guide
 
-## ✅ Access URL
+## ✅ Primary Access URL
 ```
 http://localhost:3000
 ```
-**This is the Co-Work unified workspace interface.**
+**This is the unified URL for the Co-Work application.**
 
 ---
 
-## Architecture
+## 🏛️ Architecture Details
 
-Co-Work runs a unified full-stack Node.js / Express & Vite application listening on **port 3000**:
-- **UI**: Modern React, Tailwind CSS, Lucide icons, Framer Motion
-- **API**: Express server handling API routes and Gemini AI orchestration
-- **Static Assets & SPA**: Vite middleware automatically serves the interface on port 3000
+Co-Work operates as a single, unified full-stack Node.js / Express server on **port 3000**:
+- **Single Port Simplicity**: All client assets, API endpoints, WebSockets, and AI pipelines run on port 3000.
+- **No Secondary Ports**: There are no separate ports (such as 8000 or 5173). All routes are handled through port 3000.
+- **Health Check**:
+  - `GET http://localhost:3000/api/health`
+  - `GET http://localhost:3000/health`
 
 ---
 
-## How to Start
+## 🚀 How to Launch
 
-Run from the project root:
+From the root directory:
 ```bash
 npm run dev
 ```
 
-Then open your browser at **http://localhost:3000**.
+Then visit **http://localhost:3000** in your browser.

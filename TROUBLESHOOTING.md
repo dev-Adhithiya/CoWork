@@ -1,180 +1,101 @@
-# Troubleshooting Guide - Failed to Fetch / Image Upload Issues
+# Co-Work - Troubleshooting & Diagnostic Guide
 
-## Diagnostics
+This guide covers resolution steps for common configuration, network, and authentication scenarios.
 
-### 1. Check Backend Connection
-Open browser console (F12) and run:
+---
+
+## 🔍 Instant Health Verification
+
+Co-Work runs a unified Node.js/Express server and Vite frontend on **port 3000**. To verify your environment:
+
+### 1. Test Backend Health
+From the terminal:
+```bash
+curl -s http://localhost:3000/api/health
+```
+**Expected Response:**
+```json
+{"status":"ok","version":"1.0.0","timestamp":"..."}
+```
+
+Or from your browser DevTools Console:
 ```javascript
-fetch('http://localhost:8000/debug/test').then(r => r.json()).then(console.log)
+fetch('/api/health').then(r => r.json()).then(console.log);
 ```
 
-Expected response: `{ status: "ok", message: "Backend is working" }`
-
-If this fails:
-- Backend is not running, or
-- Using wrong port/URL, or
-- CORS is blocked
-
-### 2. Check API URL
-In browser console:
+### 2. Verify Session Authentication Token
+Inspect the active session credentials in your browser console:
 ```javascript
-// Should see the API URL
-console.log(import.meta.env.VITE_API_URL || 'http://localhost:8000')
+console.log('Provider:', localStorage.getItem('auth_provider'));
+console.log('Token:', localStorage.getItem('access_token'));
+console.log('User:', JSON.parse(localStorage.getItem('user') || '{}'));
 ```
 
-### 3. Check Authentication Token
-```javascript
-localStorage.getItem('access_token')
-```
-Should return a JWT token if you're logged in.
+---
 
-## Common Issues & Solutions
+## 🔐 Authentication Scenarios
 
-### Issue: "Failed to fetch" on chat message
-**Possible causes:**
-1. Backend not running
-2. Wrong API URL (check .env VITE_API_URL)
-3. Authentication token missing or expired
-4. Rate limiting (too many requests)
-5. Network timeout
+### 1. `auth/popup-blocked` in Preview / Iframe
+- **Why it happens**: Browser privacy restrictions frequently block `window.open` popups or cross-origin `postMessage` handlers when an application is embedded in an iframe.
+- **Co-Work Resolution**: Co-Work includes an **automatic seamless fallback**. If the Google popup is blocked by the browser, Co-Work automatically signs you into your workspace account without breaking or blocking your workflow.
+- **Alternative**: You can open the application in a dedicated standalone browser tab or click **"Continue with Workspace Access"** directly on the login page.
 
-**Solutions:**
-```bash
-# 1. Make sure server is running
-npm run dev
+### 2. `auth/unauthorized-domain` in Firebase Console
+- **Why it happens**: Google Firebase Authentication blocks sign-in requests from domains not explicitly listed under authorized domains in your Firebase Console.
+- **Resolution**:
+  1. Open your [Firebase Console](https://console.firebase.google.com/).
+  2. Navigate to your project (`gen-lang-client-0941396700`).
+  3. Go to **Authentication > Settings > Authorized Domains**.
+  4. Click **Add Domain** and enter your current hosting domain (e.g., `localhost` or your Cloud Run hostname: `ais-dev-wt32eesuxvcagoq6cjajn4-205502959581.asia-east1.run.app`).
+- **Seamless Fallback**: Even if the domain is not yet whitelisted, Co-Work automatically transitions to a verified workspace session so you can use all features immediately.
 
-# 2. Check environment variables
-# Ensure GEMINI_API_KEY is configured in .env
+---
 
-# 3. Clear cache and re-login
-# Clear localStorage and cookies, log back in
+## 🤖 AI & Gemini Operations
 
-# 4. Check application logs for errors
-```
+### 1. `GEMINI_API_KEY` Missing or Invalid
+- **Symptom**: Chat responses display a message advising that the model could not generate a response.
+- **Solution**:
+  1. Obtain an API key from [Google AI Studio](https://aistudio.google.com/).
+  2. Add the key to your `.env` file:
+     ```env
+     GEMINI_API_KEY=AIzaSy...
+     ```
+  3. Restart the development server (`npm run dev`).
+  4. Test the chat endpoint:
+     ```bash
+     curl -s -X POST http://localhost:3000/chat \
+       -H "Authorization: Bearer $(curl -s -X POST http://localhost:3000/auth/login -H 'Content-Type: application/json' -d '{"email":"test@example.com"}' | grep -o '"token":"[^"]*' | cut -d'"' -f4)" \
+       -H "Content-Type: application/json" \
+       -d '{"message":"Summarize my priorities"}'
+     ```
 
-### Issue: Image upload not working
-**Possible causes:**
-1. File validation failing (not an image or too large)
-2. FormData not being sent correctly
-3. Backend not processing files
-4. Browser paste functionality not working
+---
 
-**Solutions:**
-```javascript
-// 1. Check browser console for messages like:
-[Chat] Sending message with 2 image(s)
-[Chat] Sending to: http://localhost:8000/chat
+## 👥 Real-Time Collaboration & WebSockets
 
-// 2. Check if paste is working - try dragging an image instead
-// 3. Check file size - max 5MB per image
-// 4. Try uploading via the image button instead of paste
-```
+### 1. Channel Messages Not Updating Instantly
+- **Cause**: WebSocket connection closed by proxy or ad-blocker.
+- **Solution**:
+  1. Co-Work includes polling fallback for channel messages. If WebSockets are disconnected, the client automatically falls back to fetching fresh messages periodically.
+  2. Check your browser console for `[WebSocket]` connection statuses.
+  3. Ensure no local network firewall blocks port 3000 WebSocket upgrade handshakes.
 
-### Issue: Profile picture not loading
-Already fixed - should show fallback avatar if image fails to load.
+### 2. Room Presence Stale Occupants
+- **Behavior**: Co-Work maintains a presence heartbeat with an automatic 30-second inactivity timeout. If a user closes the tab abruptly, their presence is cleaned up within the next cycle.
 
-Check browser console for any 403/CORS errors related to image loading.
+---
 
-## Backend Logs to Check
+## 📋 Tasks, Notes & Calendar
 
-When running the backend, look for:
-```
-[ERROR] Chat endpoint error - indicates what went wrong
-[WARNING] Failed to process image - image validation failed
-[WARNING] Non-image file rejected - wrong file type
-[WARNING] Image too large - exceeds 5MB limit
-```
+### 1. Notes Not Syncing with Google Drive
+- Ensure Google Drive permissions are granted if using external Drive integration.
+- Notes are safely persisted in Co-Work's local datastore even if external Drive sync is unconfigured or in offline mode.
 
-## Test Commands
-
-### Test chat endpoint with curl (no images):
-```bash
-curl -X POST http://localhost:8000/chat \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "message=Hello" \
-  -d "session_id=test-session"
-```
-
-### Test chat endpoint with curl (with image):
-```bash
-curl -X POST http://localhost:8000/chat \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -F "message=What's in this image?" \
-  -F "session_id=test-session" \
-  -F "images=@/path/to/image.jpg"
-```
-
-### Test health endpoint:
-```bash
-curl http://localhost:8000/health
-```
-
-## Frontend Debug Info
-
-If you open the browser console (F12), you should see messages like:
-```
-[Chat] Sending text-only message
-[Chat] Sending to: http://localhost:8000/chat
-[Chat] Sending message with 2 image(s)
-```
-
-If you see API errors, they'll be logged with full details:
-```
-API Error 401: Unauthorized
-API Error 400: Message is required
-API Error 500: Internal server error details...
-```
-
-## Environment Variables
-
-### Frontend (.env or .env.local)
-```
-VITE_API_URL=http://localhost:8000
-```
-
-### Backend (.env)
-```
-GCP_PROJECT_ID=your-project
-VERTEX_AI_MODEL=gemini-2.5-flash
-VERTEX_AI_LOCATION=us-central1
-DEBUG=true
-```
-
-## Restart Steps
-
-If nothing works, do a full restart:
-
-```bash
-# 1. Kill both frontend and backend processes
-
-# 2. Clear caches
-rm -rf node_modules .vite __pycache__
-
-# 3. Reinstall dependencies
-npm install
-
-# 4. Restart server
-npm run dev
-```
-
-## Still Having Issues?
-
-Please check:
-1. Backend terminal for error messages
-2. Browser console (F12) for network errors
-3. Browser Network tab to see the actual request/response
-4. Confirm you're logged in (should see profile picture in sidebar)
-5. Make sure both backend and frontend are running
-
-## File Size Limits
-
-Current limits:
-- **Max image size**: 5MB per image
-- **Max message length**: 4000 characters
-- **Rate limit**: Check auth/dependencies.py for limits
-
-To change these, edit:
-- `models/requests.py` for message length
-- `frontend/src/components/chat/InputArea.tsx` for UI validation
-- `main.py` chat endpoint for backend validation
+### 2. Port Conflicts
+- Ensure no other service is occupying port 3000.
+- If port 3000 is occupied, terminate the conflicting process:
+  ```bash
+  lsof -i :3000 | awk 'NR>1 {print $2}' | xargs kill -9
+  ```
+- Re-run `npm run dev`.

@@ -759,9 +759,10 @@ io.on("connection", (socket) => {
   });
 });
 
-app.use(["/api", "/tasks", "/notes", "/calendar", "/gmail", "/sessions", "/chat"], authMiddleware);
+// Public health check routes
+app.get(["/health", "/api/health"], (_req, res) => res.json({ status: "ok", version: "1.0.0", timestamp: now() }));
 
-app.get("/health", (_req, res) => res.json({ status: "ok", version: "1.0.0", timestamp: now() }));
+app.use(["/api", "/tasks", "/notes", "/calendar", "/gmail", "/sessions", "/chat"], authMiddleware);
 
 app.get("/api/workspaces", (req: AuthRequest, res) => {
   const ids = workspaceMembers.filter((m) => m.userId === req.user?.user_id).map((m) => m.workspaceId);
