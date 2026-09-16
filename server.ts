@@ -146,7 +146,7 @@ let notes = [
     note_id: "note_1",
     title: "Co-Work Architecture Notes",
     content:
-      "Co-Work operates as a proactive Chief of Staff. Key modules include Calendar synchronization, Task management, intelligent Priority feed, unified in-memory elastic search, and Gemini-driven conversational reasoning.",
+      "Co-Work operates as a proactive Chief of Staff. Key modules include Calendar synchronization, Task management, intelligent Priority feed, unified workspace search, and Gemini-driven conversational reasoning.",
     tags: ["architecture", "ai", "roadmap"],
     source: "cowork_core",
     created_at: new Date().toISOString(),
@@ -234,15 +234,32 @@ app.get("/health", (_req: Request, res: Response) => {
 });
 
 // Auth
-app.get("/auth/login", (_req: Request, res: Response) => {
+const handleLogin = (req: Request, res: Response) => {
   const token = `cowork_token_${Date.now()}`;
-  const userJson = encodeURIComponent(JSON.stringify(currentUser));
+  const email = (req.body?.email as string) || (req.query?.email as string) || currentUser.email;
+  const name = (req.body?.name as string) || (req.query?.name as string) || currentUser.name;
+
+  const user = {
+    ...currentUser,
+    email,
+    name,
+    last_login: new Date().toISOString(),
+  };
+
+  const userJson = encodeURIComponent(JSON.stringify(user));
   const authorization_url = `/?auth_success=true#access_token=${token}&user=${userJson}`;
+
   res.json({
+    success: true,
+    token,
+    user,
     authorization_url,
     state: "cowork_active_state",
   });
-});
+};
+
+app.get("/auth/login", handleLogin);
+app.post("/auth/login", handleLogin);
 
 app.get("/auth/me", (req: Request, res: Response) => {
   const authHeader = req.headers.authorization;
@@ -363,7 +380,7 @@ Be proactive, concise, articulate, and helpful. Suggest concrete next steps or a
         }));
 
         const result = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
+          model: "gemini-3.1-pro-preview",
           contents: chatHistoryForGemini,
           config: {
             systemInstruction: promptContext,
@@ -372,35 +389,8 @@ Be proactive, concise, articulate, and helpful. Suggest concrete next steps or a
 
         replyText = result.text || "I have received your request and processed it across your workspace.";
       } catch (err) {
-        console.warn("Gemini API call failed, falling back to rule-based assistant:", err);
-      }
-    }
-
-    // Fallback rule-based responses if Gemini is unavailable
-    if (!replyText) {
-      const lower = message.toLowerCase();
-      if (lower.includes("calendar") || lower.includes("schedule") || lower.includes("meeting") || lower.includes("events")) {
-        replyText = `You have ${events.length} events scheduled today:\n\n` +
-          events.map((e) => `• **${e.summary}** at ${new Date(e.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (${e.location || 'Virtual'})`).join("\n") +
-          `\n\nWould you like me to draft meeting prep notes or schedule a new event?`;
-      } else if (lower.includes("task") || lower.includes("todo")) {
-        const pending = tasks.filter((t) => !t.is_completed);
-        replyText = `You have ${pending.length} pending tasks:\n\n` +
-          pending.map((t) => `• **${t.title}** (due ${new Date(t.due).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`).join("\n") +
-          `\n\nI can add a new task, mark one completed, or adjust priorities for you.`;
-      } else if (lower.includes("email") || lower.includes("mail") || lower.includes("sarah") || lower.includes("inbox")) {
-        const unread = emails.filter((e) => e.is_unread);
-        replyText = `You have ${unread.length} unread emails:\n\n` +
-          unread.map((e) => `• **${e.subject}** from ${e.from}`).join("\n") +
-          `\n\nSarah Chen requested feedback on the product roadmap before 3 PM. Would you like me to send the prepared draft reply?`;
-      } else if (lower.includes("briefing") || lower.includes("summary") || lower.includes("morning")) {
-        replyText = `Here is your Daily Catch-Up Summary:\n\n` +
-          `• **Calendar**: 3 events today starting with Executive Sprint Review.\n` +
-          `• **Urgent**: Sarah Chen needs roadmap sign-off before 3 PM.\n` +
-          `• **Tasks**: 3 active deliverables on track.\n\n` +
-          `Everything is in order. How would you like to proceed?`;
-      } else {
-        replyText = `I am on it. I reviewed your calendar, tasks, and communications. You have 3 events today and Sarah's urgent email regarding the Q3 roadmap. Let me know if you would like me to schedule a meeting, draft a reply, or add a task!`;
+        console.error("Gemini API call failed:", err);
+        replyText = "Error: Failed to generate a response from the AI model. Please check your API key and model availability.";
       }
     }
 

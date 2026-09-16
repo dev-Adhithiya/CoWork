@@ -6,14 +6,17 @@ import { useAuth } from '../../contexts/AuthContext';
 export function LoginPage() {
   const { login, isLoading: authLoading } = useAuth();
   const [isSigningIn, setIsSigningIn] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
 
   const handleSignIn = async () => {
     try {
       setIsSigningIn(true);
+      setErrorMsg('');
       await login();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Sign in failed:', error);
       setIsSigningIn(false);
+      setErrorMsg(error?.message || 'Something went wrong. Please try again.');
     }
   };
 
@@ -36,6 +39,12 @@ export function LoginPage() {
         <p className="text-sm font-medium tracking-wide text-neutral-400 dark:text-neutral-400 mb-8">
           Collaboration Workspace
         </p>
+
+        {errorMsg && (
+          <div className="mb-4 p-3 w-full bg-red-500/10 border border-red-500/20 rounded-lg text-red-500 text-sm">
+            {errorMsg}
+          </div>
+        )}
 
         {/* Minimalist Sign In Action */}
         <button

@@ -39,34 +39,18 @@ export const CoWorkLogo: React.FC<CoWorkLogoProps> = ({
         isStacked ? 'flex-col items-center gap-3' : 'items-center gap-3'
       } ${className}`}
     >
-      {/* Interlocking 'cw' logo mark */}
-      <svg
-        width={iconDimensions.width}
-        height={iconDimensions.height}
-        viewBox="0 0 185 105"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-        className="flex-shrink-0 transition-transform duration-300 hover:scale-105"
-      >
-        {/* 'c' letter - Vibrant Royal Blue */}
-        <path
-          d="M 80 30 A 34 34 0 1 0 80 76"
-          stroke="#2B6BF3"
-          strokeWidth="20"
-          strokeLinecap="round"
-          fill="none"
-        />
-
-        {/* 'w' letter - Midnight Slate in light mode, Clean White in dark mode */}
-        <path
-          d="M 80 53 L 98 74 L 118 45 L 138 74 L 156 40"
-          className="stroke-[#0F172A] dark:stroke-white"
-          strokeWidth="20"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          fill="none"
-        />
-      </svg>
+      {/* Logo Image */}
+      <img
+        src="/logo.png"
+        alt="Co-Work Logo"
+        width={iconDimensions.width * 1.5}
+        height={iconDimensions.height * 1.5}
+        className="flex-shrink-0 transition-transform duration-300 hover:scale-105 object-contain"
+        onError={(e) => {
+          // Fallback if user hasn't uploaded logo.png yet
+          (e.target as HTMLImageElement).style.display = 'none';
+        }}
+      />
 
       {/* Wordmark: "co work" (bold lowercase) */}
       {variant === 'full' && (

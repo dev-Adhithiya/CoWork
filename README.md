@@ -27,7 +27,7 @@ A powerful, proactive workspace assistant that seamlessly connects with your dai
 
 ### 📋 Actionable Task & Notes System
 - Integrated task management with due date detection and completion tracking.
-- Unified elastic search across conversations, notes, calendar events, and messages.
+- Unified workspace search across conversations, notes, calendar events, and messages.
 
 ### 🎨 Design & Aesthetic
 - Clean, focused interface built with dark mode and light mode support.

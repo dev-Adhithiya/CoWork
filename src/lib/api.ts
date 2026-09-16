@@ -3,11 +3,7 @@
 
 // Auto-detect API URL: use environment variable, or use same origin
 const getApiBaseUrl = () => {
-  // Use explicit environment variable if set
-  if (import.meta.env.VITE_API_URL) {
-    return import.meta.env.VITE_API_URL;
-  }
-  // Use same origin (relative path)
+  // We use same origin since backend and frontend are on port 3000
   return '';
 };
 
@@ -216,10 +212,22 @@ async function handleResponse<T>(response: Response): Promise<T> {
   });
 }
 
+export interface LoginResponse {
+  token: string;
+  user: User;
+  authorization_url?: string;
+  state?: string;
+  success?: boolean;
+}
+
 // Auth API
 export const authAPI = {
-  async login(): Promise<{ authorization_url: string; state: string }> {
-    const response = await fetch(`${API_BASE_URL}/auth/login`);
+  async login(credentials?: { email?: string; name?: string }): Promise<LoginResponse> {
+    const response = await fetch(`${API_BASE_URL}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(credentials || {}),
+    });
     return handleResponse(response);
   },
 
@@ -536,7 +544,7 @@ export const priorityAPI = {
   },
 };
 
-// ─── Elasticsearch Search AI ────────────────────────────────────────────────
+// ─── Workspace Search ────────────────────────────────────────────────────────
 
 export interface SearchResult {
   type: 'note' | 'email' | 'task' | 'event' | string;

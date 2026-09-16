@@ -2,30 +2,24 @@ import { useState } from 'react';
 import { motion } from 'motion/react';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
-import { ChatProvider, useChat } from './contexts/ChatContext';
+import { ChatProvider } from './contexts/ChatContext';
 import { VoiceProvider } from './contexts/VoiceContext';
 import { SettingsProvider } from './contexts/SettingsContext';
 import { MeshGradient } from './components/background/MeshGradient';
 import { Sidebar } from './components/sidebar/Sidebar';
 import { ChatInterface } from './components/chat/ChatInterface';
+import { LoginPage } from './components/auth/LoginPage';
+import { TeamChatPanel } from './components/features/TeamChatPanel';
 import { PriorityPanel } from './components/features/PriorityPanel';
 import { BriefingPanel } from './components/features/BriefingPanel';
-import { EmailDraftConsole } from './components/features/EmailDraftConsole';
-import { SearchPanel } from './components/features/SearchPanel';
-import { LoginPage } from './components/auth/LoginPage';
-
 import { CalendarPanel } from './components/features/CalendarPanel';
 import { TasksPanel } from './components/features/TasksPanel';
 import { NotesPanel } from './components/features/NotesPanel';
-import { GlassPanel } from './components/ui/GlassPanel';
-import { PanelRight, PanelRightClose } from 'lucide-react';
+import { Sparkles, Users, LogOut } from 'lucide-react';
 
 function AppContent() {
-  const { isAuthenticated, isLoading } = useAuth();
-  // Controls whether the right utility panel stack is fully shown or collapsed.
-  const [isRightSidebarCollapsed, setIsRightSidebarCollapsed] = useState(false);
-  const [isSearchOpen] = useState(false);
-  const { isEmailModeActive } = useChat();
+  const { isAuthenticated, isLoading, logout } = useAuth();
+  const [activeChat, setActiveChat] = useState<'ai' | 'team'>('ai');
 
   if (isLoading) {
     return (
@@ -59,57 +53,80 @@ function AppContent() {
         transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
         className="relative z-10 flex h-full p-4 gap-4"
       >
-        {/* Sidebar */}
-        <Sidebar />
-
-        {/* Content area */}
         <div className="flex-1 flex gap-4 w-full max-w-full">
-          <div className="flex-1 min-w-[400px] flex">
-            <ChatInterface />
+          {/* Middle panel: MS Teams style Chat Interface */}
+          <div className="flex-1 min-w-[500px] flex bg-white/5 border border-white/10 rounded-xl overflow-hidden backdrop-blur-md">
+            {/* Contacts/Chat List Column */}
+            <div className="w-64 border-r border-white/10 flex flex-col bg-black/20">
+              <div className="p-4 border-b border-white/10 flex items-center justify-between">
+                <h2 className="font-semibold text-white/90">Chats</h2>
+                <button
+                  onClick={logout}
+                  className="p-1.5 rounded-lg text-white/60 hover:bg-white/10 hover:text-white transition-colors"
+                  title="Sign out"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                <button
+                  onClick={() => setActiveChat('ai')}
+                  className={`w-full flex items-center gap-3 px-3 py-3 rounded-lg text-left transition-colors ${
+                    activeChat === 'ai'
+                      ? 'bg-blue-500/20 text-blue-100'
+                      : 'hover:bg-white/10 text-white/70'
+                  }`}
+                >
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                    activeChat === 'ai' ? 'bg-blue-500/30' : 'bg-white/10'
+                  }`}>
+                    <Sparkles className="w-4 h-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-sm truncate">Co-Work AI</div>
+                    <div className="text-xs opacity-70 truncate">Your Chief of Staff</div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => setActiveChat('team')}
+                  className={`w-full flex items-center gap-3 px-3 py-3 rounded-lg text-left transition-colors ${
+                    activeChat === 'team'
+                      ? 'bg-blue-500/20 text-blue-100'
+                      : 'hover:bg-white/10 text-white/70'
+                  }`}
+                >
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                    activeChat === 'team' ? 'bg-blue-500/30' : 'bg-white/10'
+                  }`}>
+                    <Users className="w-4 h-4" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-sm truncate">Team General</div>
+                    <div className="text-xs opacity-70 truncate">Staff & Co-workers</div>
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            {/* Active Chat Content Column */}
+            <div className="flex-1 flex flex-col min-w-0">
+              {activeChat === 'ai' ? (
+                <ChatInterface />
+              ) : (
+                <TeamChatPanel />
+              )}
+            </div>
           </div>
           
-          {isEmailModeActive ? (
-            <div className="flex-1 min-w-[400px] flex">
-              <EmailDraftConsole />
-            </div>
-          ) : (
-            /* Feature panels (right side) - Collapsible */
-            isRightSidebarCollapsed ? (
-              // Compact mode: keep a single action to restore full utilities panel.
-              <GlassPanel className="w-12 flex flex-col items-center py-4 flex-shrink-0">
-                <button
-                  onClick={() => setIsRightSidebarCollapsed(false)}
-                  className="p-2 rounded-lg hover:bg-white/10 transition-colors"
-                  title="Expand panel"
-                >
-                  <PanelRight className="w-5 h-5 text-white/60" />
-                </button>
-              </GlassPanel>
-            ) : (
-              // Expanded mode: show briefing + communication/planning feature panels.
-              <div className="w-96 flex flex-col gap-4 overflow-y-auto flex-shrink-0">
-                {/* Collapse button */}
-                <div className="flex justify-end">
-                  <button
-                    onClick={() => setIsRightSidebarCollapsed(true)}
-                    className="p-2 rounded-lg hover:bg-white/10 transition-colors"
-                    title="Collapse panel"
-                  >
-                    <PanelRightClose className="w-5 h-5 text-white/60" />
-                  </button>
-                </div>
-
-                {/* Elastic Search Panel — shown when toggled from sidebar */}
-                {isSearchOpen && <SearchPanel />}
-
-                <BriefingPanel />
-                <CalendarPanel />
-                <TasksPanel />
-                <NotesPanel />
-                <PriorityPanel />
-              </div>
-            )
-          )}
+          {/* Right panel: Utilities (Tasks, Notes, Calendar, Priority, etc.) */}
+          <div className="w-[380px] flex flex-col gap-4 overflow-y-auto flex-shrink-0">
+            <PriorityPanel />
+            <BriefingPanel />
+            <CalendarPanel />
+            <TasksPanel />
+            <NotesPanel />
+          </div>
         </div>
       </motion.div>
     </div>
