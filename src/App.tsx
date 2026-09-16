@@ -1,12 +1,11 @@
 import { useState } from 'react';
-import { motion } from 'motion/react';
+import { motion } from 'framer-motion';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ChatProvider } from './contexts/ChatContext';
 import { VoiceProvider } from './contexts/VoiceContext';
 import { SettingsProvider } from './contexts/SettingsContext';
 import { MeshGradient } from './components/background/MeshGradient';
-import { Sidebar } from './components/sidebar/Sidebar';
 import { ChatInterface } from './components/chat/ChatInterface';
 import { LoginPage } from './components/auth/LoginPage';
 import { TeamChatPanel } from './components/features/TeamChatPanel';
@@ -15,6 +14,8 @@ import { BriefingPanel } from './components/features/BriefingPanel';
 import { CalendarPanel } from './components/features/CalendarPanel';
 import { TasksPanel } from './components/features/TasksPanel';
 import { NotesPanel } from './components/features/NotesPanel';
+import { MeetingSummaryPanel } from './components/features/MeetingSummaryPanel';
+import { StandupPanel } from './components/features/StandupPanel';
 import { Sparkles, Users, LogOut } from 'lucide-react';
 
 function AppContent() {
@@ -122,6 +123,8 @@ function AppContent() {
           {/* Right panel: Utilities (Tasks, Notes, Calendar, Priority, etc.) */}
           <div className="w-[380px] flex flex-col gap-4 overflow-y-auto flex-shrink-0">
             <PriorityPanel />
+            <MeetingSummaryPanel />
+            <StandupPanel />
             <BriefingPanel />
             <CalendarPanel />
             <TasksPanel />
@@ -151,4 +154,3 @@ function App() {
 }
 
 export default App;
-

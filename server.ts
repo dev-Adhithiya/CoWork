@@ -2,10 +2,14 @@ import express, { Request, Response } from "express";
 import cors from "cors";
 import path from "path";
 import multer from "multer";
+import { createServer } from "http";
+import { Server } from "socket.io";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 
 const app = express();
+const httpServer = createServer(app);
+const io = new Server(httpServer, { cors: { origin: "*" } });
 const PORT = 3000;
 const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } });
 
@@ -13,7 +17,6 @@ app.use(cors());
 app.use(express.json({ limit: "15mb" }));
 app.use(express.urlencoded({ extended: true, limit: "15mb" }));
 
-// ─── Lazy Gemini Client ────────────────────────────────────────────────────────
 let geminiClient: GoogleGenAI | null = null;
 function getGemini(): GoogleGenAI | null {
   if (!geminiClient && process.env.GEMINI_API_KEY) {
@@ -22,23 +25,37 @@ function getGemini(): GoogleGenAI | null {
   return geminiClient;
 }
 
-// ─── Workspace Types & Data ───────────────────────────────────────────────────
+const now = () => new Date().toISOString();
+const makeId = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-export interface Workspace {
+const currentUser = {
+  user_id: "user_cowork_1",
+  email: "askadhithiya@gmail.com",
+  name: "Adhithiya",
+  picture: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80",
+  settings: { theme: "dark", voice_enabled: true, notifications: true },
+  created_at: now(),
+  last_login: now(),
+};
+
+type WorkspaceRole = "owner" | "admin" | "member";
+type MentionType = "user" | "github";
+
+interface Workspace {
   id: string;
   name: string;
   createdAt: string;
   ownerId: string;
 }
 
-export interface WorkspaceMember {
+interface WorkspaceMember {
   workspaceId: string;
   userId: string;
-  role: "owner" | "admin" | "member";
+  role: WorkspaceRole;
   joinedAt: string;
 }
 
-export interface Channel {
+interface Channel {
   id: string;
   workspaceId: string;
   name: string;
@@ -47,42 +64,64 @@ export interface Channel {
   linkedGithubRepo: string | null;
 }
 
-export interface ChannelMember {
+interface ChannelMember {
   channelId: string;
   userId: string;
   joinedAt: string;
 }
 
-let workspaces: Workspace[] = [];
-let workspaceMembers: WorkspaceMember[] = [];
-let channels: Channel[] = [];
-let channelMembers: ChannelMember[] = [];
+interface Room {
+  id: string;
+  workspaceId: string;
+  name: string;
+  createdAt: string;
+}
 
-// ─── In-Memory Data Stores ─────────────────────────────────────────────────────
+interface RoomPresence {
+  roomId: string;
+  userId: string;
+  userName: string;
+  userPicture?: string;
+  enteredAt: string;
+  socketIds: string[];
+}
 
-const currentUser = {
-  user_id: "user_cowork_1",
-  email: "askadhithiya@gmail.com",
-  name: "Adhithiya",
-  picture: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80",
-  settings: {
-    theme: "dark",
-    voice_enabled: true,
-    notifications: true,
-  },
-  created_at: new Date().toISOString(),
-  last_login: new Date().toISOString(),
-};
+interface GithubConnection {
+  workspaceId: string;
+  encryptedToken: string;
+  updatedAt: string;
+}
 
-// Seed initial personal workspace
-const defaultWorkspaceId = `ws_personal_${currentUser.user_id}`;
-workspaces.push({ id: defaultWorkspaceId, name: "Personal", createdAt: new Date().toISOString(), ownerId: currentUser.user_id });
-workspaceMembers.push({ workspaceId: defaultWorkspaceId, userId: currentUser.user_id, role: "owner", joinedAt: new Date().toISOString() });
+interface GithubMentionData {
+  repo: string;
+  number: number;
+  title?: string;
+  state?: "open" | "closed" | "merged";
+  author?: string;
+  labels?: string[];
+  url?: string;
+  kind?: "issue" | "pull_request";
+  resolved: boolean;
+  error?: "invalid_repo" | "rate_limited" | "not_found_or_private" | "unlinked_repo" | "github_error";
+  hint?: string;
+}
 
-// Seed initial general channel
-const defaultChannelId = `chan_general_${Date.now()}`;
-channels.push({ id: defaultChannelId, workspaceId: defaultWorkspaceId, name: "general", createdAt: new Date().toISOString(), createdBy: currentUser.user_id, linkedGithubRepo: null });
-channelMembers.push({ channelId: defaultChannelId, userId: currentUser.user_id, joinedAt: new Date().toISOString() });
+interface MessageMention {
+  type: MentionType;
+  value: string;
+  data?: GithubMentionData;
+}
+
+interface TeamMessage {
+  id: string;
+  channelId: string;
+  authorId: string;
+  authorName: string;
+  content: string;
+  createdAt: string;
+  editedAt: string | null;
+  mentions: MessageMention[];
+}
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -98,873 +137,1033 @@ interface ChatSession {
   created_at: string;
   updated_at: string;
   messages: ChatMessage[];
-  workspaceId?: string;
+  workspaceId: string;
 }
 
-const sessions: Map<string, ChatSession> = new Map();
+interface MeetingTranscriptChunk {
+  speaker: string;
+  text: string;
+  timestamp: string;
+}
 
-// Seed initial session
-const defaultSessionId = "session_welcome";
-sessions.set(defaultSessionId, {
-  session_id: defaultSessionId,
-  title: "Morning Briefing & Calendar Review",
-  created_at: new Date(Date.now() - 3600000).toISOString(),
-  updated_at: new Date().toISOString(),
-  messages: [
-    {
-      role: "assistant",
-      content:
-        "Hello Adhithiya! I am Co-Work, your Chief of Staff and workspace assistant. Your workspace is synced with Google Calendar, Gmail, Tasks, and Notes. How can I help streamline your day?",
-      timestamp: new Date().toISOString(),
-    },
-  ],
-  workspaceId: defaultWorkspaceId,
-});
+interface MeetingSummaryVersion {
+  id: string;
+  generatedAt: string;
+  summary: string;
+  sourceChunkCount: number;
+  status: "ai-generated" | "fallback";
+}
 
-let events = [
-  {
-    id: "evt_1",
-    summary: "Executive Sprint Review & Product Sync",
-    start: new Date(Date.now() + 1000 * 60 * 60 * 2).toISOString(),
-    end: new Date(Date.now() + 1000 * 60 * 60 * 3).toISOString(),
-    location: "Google Meet",
-    description: "Review sprint deliverables, architectural progress, and AI assistant enhancements.",
-    meet_link: "https://meet.google.com/zen-ith-meet",
-    attendees: ["askadhithiya@gmail.com", "sarah.chen@techcorp.io", "alex.dev@techcorp.io"],
-    workspaceId: defaultWorkspaceId,
-  },
-  {
-    id: "evt_2",
-    summary: "AI Architecture & Latency Benchmark Sync",
-    start: new Date(Date.now() + 1000 * 60 * 60 * 5).toISOString(),
-    end: new Date(Date.now() + 1000 * 60 * 60 * 6).toISOString(),
-    location: "Room 402 / Virtual",
-    description: "Discussion on multi-modal tool routing and token caching strategies.",
-    meet_link: "https://meet.google.com/arch-sync-now",
-    attendees: ["askadhithiya@gmail.com", "elena.rostova@cloud.io"],
-    workspaceId: defaultWorkspaceId,
-  },
-  {
-    id: "evt_3",
-    summary: "Quarterly Strategy & Goal Alignment",
-    start: new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(),
-    end: new Date(Date.now() + 1000 * 60 * 60 * 25).toISOString(),
-    location: "Conference Hall A",
-    description: "Review quarterly objectives, user satisfaction metrics, and upcoming milestones.",
-    meet_link: "",
-    attendees: ["askadhithiya@gmail.com", "leadership@techcorp.io"],
-    workspaceId: defaultWorkspaceId,
-  },
-];
+interface MeetingTranscript {
+  id: string;
+  workspaceId: string;
+  meetingId: string;
+  chunks: MeetingTranscriptChunk[];
+  startedAt: string;
+  endedAt: string | null;
+  summaries: MeetingSummaryVersion[];
+  lastSummarizedChunkIndex: number;
+}
 
-let tasks = [
-  {
-    id: "task_1",
-    title: "Review Q3 product roadmap & milestones",
-    notes: "Ensure all deliverables have assigned leads and risk mitigations documented.",
-    due: new Date(Date.now() + 1000 * 60 * 60 * 8).toISOString(),
-    is_completed: false,
-    created_at: new Date().toISOString(),
-    workspaceId: defaultWorkspaceId,
-  },
-  {
-    id: "task_2",
-    title: "Reply to Sarah regarding marketing proposal",
-    notes: "Approve budget reallocation for developer summit sponsorship.",
-    due: new Date(Date.now() + 1000 * 60 * 60 * 12).toISOString(),
-    is_completed: false,
-    created_at: new Date().toISOString(),
-    workspaceId: defaultWorkspaceId,
-  },
-  {
-    id: "task_3",
-    title: "Review Co-Work latency test results",
-    notes: "Assess TTFT and cache hit rates across mobile and web clients.",
-    due: new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(),
-    is_completed: false,
-    created_at: new Date().toISOString(),
-    workspaceId: defaultWorkspaceId,
-  },
-  {
-    id: "task_4",
-    title: "Update security compliance checklist",
-    notes: "Verify OAuth token rotation policies.",
-    due: new Date(Date.now() - 1000 * 60 * 60 * 10).toISOString(),
-    is_completed: true,
-    created_at: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(),
-    workspaceId: defaultWorkspaceId,
-  },
-];
+interface StandupEntry {
+  id: string;
+  workspaceId: string;
+  userId: string;
+  userName: string;
+  date: string;
+  content: string;
+  createdAt: string;
+}
 
-let notes = [
-  {
-    note_id: "note_1",
-    title: "Co-Work Architecture Notes",
-    content:
-      "Co-Work operates as a proactive Chief of Staff. Key modules include Calendar synchronization, Task management, intelligent Priority feed, unified workspace search, and Gemini-driven conversational reasoning.",
-    tags: ["architecture", "ai", "roadmap"],
-    source: "cowork_core",
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    workspaceId: defaultWorkspaceId,
-  },
-  {
-    note_id: "note_2",
-    title: "Key Meeting Takeaways - Sprint 14",
-    content:
-      "Prioritize response latency and local responsiveness. All UI controls should support keyboard navigation and dark glassmorphic styling.",
-    tags: ["meeting", "sprint"],
-    source: "calendar_prep",
-    created_at: new Date(Date.now() - 86400000).toISOString(),
-    updated_at: new Date().toISOString(),
-    workspaceId: defaultWorkspaceId,
-  },
-];
+interface StandupDigest {
+  id: string;
+  workspaceId: string;
+  date: string;
+  mergedSummary: string;
+  generatedAt: string;
+  status: "ai-generated" | "fallback";
+}
 
-let emails = [
-  {
-    id: "mail_1",
-    from: "Sarah Chen <sarah.chen@techcorp.io>",
-    subject: "Urgent: Feedback on Q3 Product Roadmap before 3 PM",
-    snippet: "Hi Adhithiya, could you please take a look at the attached roadmap revisions? We need your sign-off by 3 PM today.",
-    body_text:
-      "Hi Adhithiya,\n\nCould you please take a look at the attached roadmap revisions? We need your sign-off before 3 PM today to finalize the executive presentation.\n\nKey highlights:\n- Launch date set for October 15th\n- Additional engineering capacity assigned to assistant integrations\n\nThanks!\nSarah",
-    body_html:
-      "<p>Hi Adhithiya,</p><p>Could you please take a look at the attached roadmap revisions? We need your sign-off before 3 PM today to finalize the executive presentation.</p><ul><li>Launch date set for October 15th</li><li>Additional engineering capacity assigned to assistant integrations</li></ul><p>Thanks!<br>Sarah</p>",
-    is_unread: true,
-    date: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
-    workspaceId: defaultWorkspaceId,
-  },
-  {
-    id: "mail_2",
-    from: "Google Cloud Notifications <notifications@cloud.google.com>",
-    subject: "Cloud Run Service Deployed: Co-Work Production",
-    snippet: "Your revision cowork-app-00042 has completed rollout with 100% traffic allocation.",
-    body_text:
-      "Your Cloud Run service cowork-app has been successfully updated to revision cowork-app-00042.\nAll health checks passed in region asia-east1.",
-    body_html:
-      "<p>Your Cloud Run service <strong>cowork-app</strong> has been successfully updated to revision <code>cowork-app-00042</code>.</p><p>All health checks passed in region asia-east1.</p>",
-    is_unread: false,
-    date: new Date(Date.now() - 1000 * 60 * 180).toISOString(),
-    workspaceId: defaultWorkspaceId,
-  },
-  {
-    id: "mail_3",
-    from: "Alex Dev <alex.dev@techcorp.io>",
-    subject: "Sprint Review prep notes & agenda",
-    snippet: "Agenda for today's review is ready. Please let me know if you want to add any items.",
-    body_text:
-      "Hi Adhithiya,\n\nThe agenda for today's sprint review has been posted. Looking forward to showing off the new glassmorphic UI.\n\nBest,\nAlex",
-    body_html:
-      "<p>Hi Adhithiya,</p><p>The agenda for today's sprint review has been posted. Looking forward to showing off the new glassmorphic UI.</p><p>Best,<br>Alex</p>",
-    is_unread: true,
-    date: new Date(Date.now() - 1000 * 60 * 240).toISOString(),
-    workspaceId: defaultWorkspaceId,
-  },
-];
-
-let userPreferences = {
-  preferred_meeting_times: ["09:00 - 12:00", "14:00 - 17:00"],
-  frequent_contacts: ["sarah.chen@techcorp.io", "alex.dev@techcorp.io", "elena.rostova@cloud.io"],
-  email_tone: "professional_concise",
-  custom_rules: ["Flag urgent emails immediately", "Auto-draft meeting preparation notes"],
-  working_hours: {
-    start: "09:00",
-    end: "17:00",
-    days: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-  },
-  timezone: "UTC",
-  notification_preferences: {
-    daily_briefing: true,
-    email_alerts: true,
-    task_reminders: true,
-  },
-  updated_at: new Date().toISOString(),
-};
-
-// ─── API Routes ────────────────────────────────────────────────────────────────
-
-export interface AuthRequest extends Request {
+interface AuthRequest extends Request {
   user?: typeof currentUser;
   workspace?: Workspace;
 }
 
-const authMiddleware = (req: AuthRequest, res: Response, next: express.NextFunction) => {
-  // Mock authentication: always use currentUser in this single-user mock backend
-  req.user = currentUser;
+const defaultWorkspaceId = `ws_personal_${currentUser.user_id}`;
+const defaultChannelId = "chan_general_personal";
 
-  // Resolve workspace from header
-  const workspaceId = req.headers['x-workspace-id'] as string;
-  let workspace = workspaces.find((w) => w.id === workspaceId);
-  
-  // Fallback to personal workspace if not provided
-  if (!workspace) {
-    workspace = workspaces.find((w) => w.ownerId === currentUser.user_id && w.name === "Personal");
-  }
-  
-  req.workspace = workspace;
+let workspaces: Workspace[] = [{ id: defaultWorkspaceId, name: "Personal", createdAt: now(), ownerId: currentUser.user_id }];
+let workspaceMembers: WorkspaceMember[] = [{ workspaceId: defaultWorkspaceId, userId: currentUser.user_id, role: "owner", joinedAt: now() }];
+let channels: Channel[] = [{ id: defaultChannelId, workspaceId: defaultWorkspaceId, name: "general", createdAt: now(), createdBy: currentUser.user_id, linkedGithubRepo: null }];
+let channelMembers: ChannelMember[] = [{ channelId: defaultChannelId, userId: currentUser.user_id, joinedAt: now() }];
+let rooms: Room[] = [
+  { id: "room_design_personal", workspaceId: defaultWorkspaceId, name: "Design", createdAt: now() },
+  { id: "room_standup_personal", workspaceId: defaultWorkspaceId, name: "Standup", createdAt: now() },
+  { id: "room_focus_personal", workspaceId: defaultWorkspaceId, name: "Focus", createdAt: now() },
+];
+let githubConnections: GithubConnection[] = [];
+let teamMessages: TeamMessage[] = [];
+const roomPresence = new Map<string, RoomPresence[]>();
+const disconnectGraceTimers = new Map<string, NodeJS.Timeout>();
+let meetingTranscripts: MeetingTranscript[] = [];
+let standupEntries: StandupEntry[] = [];
+let standupDigests: StandupDigest[] = [];
+const sessions: Map<string, ChatSession> = new Map();
+const githubCache = new Map<string, { expiresAt: number; data: GithubMentionData }>();
+
+let events = [
+  { id: "evt_1", summary: "Executive Sprint Review & Product Sync", start: new Date(Date.now() + 7200000).toISOString(), end: new Date(Date.now() + 10800000).toISOString(), location: "Google Meet", description: "Review sprint deliverables, architectural progress, and AI assistant enhancements.", meet_link: "https://meet.google.com/zen-ith-meet", attendees: ["askadhithiya@gmail.com", "sarah.chen@techcorp.io"], workspaceId: defaultWorkspaceId },
+  { id: "evt_2", summary: "AI Architecture & Latency Benchmark Sync", start: new Date(Date.now() + 18000000).toISOString(), end: new Date(Date.now() + 21600000).toISOString(), location: "Room 402 / Virtual", description: "Discussion on multi-modal tool routing and token caching strategies.", meet_link: "https://meet.google.com/arch-sync-now", attendees: ["askadhithiya@gmail.com"], workspaceId: defaultWorkspaceId },
+];
+
+let tasks = [
+  { id: "task_1", title: "Review Q3 product roadmap & milestones", notes: "Ensure all deliverables have assigned leads and risk mitigations documented.", due: new Date(Date.now() + 28800000).toISOString(), is_completed: false, created_at: now(), workspaceId: defaultWorkspaceId },
+  { id: "task_2", title: "Reply to Sarah regarding marketing proposal", notes: "Approve budget reallocation for developer summit sponsorship.", due: new Date(Date.now() + 43200000).toISOString(), is_completed: false, created_at: now(), workspaceId: defaultWorkspaceId },
+];
+
+let notes = [
+  { note_id: "note_1", title: "Co-Work Architecture Notes", content: "Co-Work operates as a proactive Chief of Staff with calendar, task, search, notes, and Gemini-driven reasoning.", tags: ["architecture", "ai"], source: "cowork_core", created_at: now(), updated_at: now(), workspaceId: defaultWorkspaceId },
+  { note_id: "note_2", title: "Sprint 14 Takeaways", content: "Prioritize response latency, keyboard navigation, and dark glassmorphic styling.", tags: ["meeting", "sprint"], source: "calendar_prep", created_at: now(), updated_at: now(), workspaceId: defaultWorkspaceId },
+];
+
+let emails = [
+  { id: "mail_1", from: "Sarah Chen <sarah.chen@techcorp.io>", subject: "Urgent: Feedback on Q3 Product Roadmap before 3 PM", snippet: "Please take a look at the attached roadmap revisions.", body_text: "Please take a look at the roadmap revisions.", body_html: "<p>Please take a look at the roadmap revisions.</p>", is_unread: true, date: now(), workspaceId: defaultWorkspaceId },
+  { id: "mail_2", from: "Alex Dev <alex.dev@techcorp.io>", subject: "Sprint Review prep notes & agenda", snippet: "Agenda for today's review is ready.", body_text: "Agenda for today's review is ready.", body_html: "<p>Agenda for today's review is ready.</p>", is_unread: true, date: now(), workspaceId: defaultWorkspaceId },
+];
+
+let userPreferences = {
+  preferred_meeting_times: ["09:00 - 12:00", "14:00 - 17:00"],
+  frequent_contacts: ["sarah.chen@techcorp.io", "alex.dev@techcorp.io"],
+  email_tone: "professional_concise",
+  custom_rules: ["Flag urgent emails immediately", "Auto-draft meeting preparation notes"],
+  working_hours: { start: "09:00", end: "17:00", days: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"] },
+  timezone: "UTC",
+  notification_preferences: { daily_briefing: true, email_alerts: true, task_reminders: true },
+  updated_at: now(),
+};
+
+sessions.set("session_welcome", {
+  session_id: "session_welcome",
+  title: "Morning Briefing & Calendar Review",
+  created_at: now(),
+  updated_at: now(),
+  workspaceId: defaultWorkspaceId,
+  messages: [{ role: "assistant", content: "Hello Adhithiya! I am Co-Work, your Chief of Staff and workspace assistant.", timestamp: now() }],
+});
+
+function encryptToken(token: string) {
+  return Buffer.from(token, "utf8").toString("base64");
+}
+
+function decryptToken(encryptedToken: string) {
+  return Buffer.from(encryptedToken, "base64").toString("utf8");
+}
+
+function isValidRole(role: string): role is WorkspaceRole {
+  return ["owner", "admin", "member"].includes(role);
+}
+
+function isValidRepo(repo: string) {
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo);
+}
+
+function resolveWorkspace(req: AuthRequest) {
+  const workspaceId = (req.headers["x-workspace-id"] as string) || (req.query.workspaceId as string);
+  const memberWorkspaceIds = workspaceMembers.filter((m) => m.userId === currentUser.user_id).map((m) => m.workspaceId);
+  const selected = workspaces.find((w) => w.id === workspaceId && memberWorkspaceIds.includes(w.id));
+  return selected || workspaces.find((w) => w.id === defaultWorkspaceId)!;
+}
+
+const authMiddleware = (req: AuthRequest, _res: Response, next: express.NextFunction) => {
+  req.user = currentUser;
+  req.workspace = resolveWorkspace(req);
   next();
 };
 
-app.use("/api", authMiddleware);
-// Apply to existing root-level routes for now to ensure backwards compatibility
-app.use("/tasks", authMiddleware);
-app.use("/notes", authMiddleware);
-app.use("/calendar", authMiddleware);
-app.use("/gmail", authMiddleware);
-app.use("/sessions", authMiddleware);
-app.use("/chat", authMiddleware);
+function requireWorkspaceMembership(req: AuthRequest, res: Response, workspaceId = req.params.workspaceId || req.params.id) {
+  if (!workspaceMembers.some((m) => m.workspaceId === workspaceId && m.userId === req.user?.user_id)) {
+    res.status(403).json({ error: "Not a member of this workspace" });
+    return false;
+  }
+  return true;
+}
 
-// Workspace & Channel CRUD API Routes
+function getWorkspaceScoped<T extends { workspaceId: string }>(items: T[], req: AuthRequest) {
+  return items.filter((item) => item.workspaceId === req.workspace?.id);
+}
 
-app.get("/api/workspaces", (req: AuthRequest, res: Response) => {
-  // Find workspaces the user is a member of
-  const myWorkspaceIds = workspaceMembers.filter(m => m.userId === req.user?.user_id).map(m => m.workspaceId);
-  const myWorkspaces = workspaces.filter(w => myWorkspaceIds.includes(w.id));
-  res.json(myWorkspaces);
-});
+function channelForRequest(req: AuthRequest, res: Response) {
+  const channel = channels.find((c) => c.id === req.params.channelId);
+  if (!channel || channel.workspaceId !== req.workspace?.id) {
+    res.status(404).json({ error: "Channel not found in workspace" });
+    return null;
+  }
+  return channel;
+}
 
-app.post("/api/workspaces", (req: AuthRequest, res: Response) => {
-  const { name } = req.body;
-  if (!name) return res.status(400).json({ error: "Name is required" });
+function roomForRequest(req: AuthRequest, res: Response) {
+  const room = rooms.find((r) => r.id === req.params.roomId);
+  if (!room || room.workspaceId !== req.workspace?.id) {
+    res.status(404).json({ error: "Room not found in workspace" });
+    return null;
+  }
+  return room;
+}
 
-  const newWorkspace: Workspace = {
-    id: `ws_${Date.now()}`,
-    name,
-    createdAt: new Date().toISOString(),
-    ownerId: req.user!.user_id
-  };
-  workspaces.push(newWorkspace);
-  
-  workspaceMembers.push({
-    workspaceId: newWorkspace.id,
-    userId: req.user!.user_id,
-    role: "owner",
-    joinedAt: new Date().toISOString()
+function roomSnapshot(workspaceId: string) {
+  return rooms
+    .filter((room) => room.workspaceId === workspaceId)
+    .map((room) => ({
+      ...room,
+      occupants: roomPresence.get(room.id) || [],
+    }));
+}
+
+function broadcastRoomPresence(workspaceId: string, roomId: string, event: "enter" | "leave" | "snapshot") {
+  const room = rooms.find((candidate) => candidate.id === roomId);
+  if (!room) return;
+  io.to(`workspace:${workspaceId}`).emit("room:presence", {
+    event,
+    roomId,
+    occupants: roomPresence.get(roomId) || [],
+    rooms: roomSnapshot(workspaceId),
   });
+}
 
-  // Create default general channel
-  const defaultChannel: Channel = {
-    id: `chan_${Date.now()}`,
-    workspaceId: newWorkspace.id,
-    name: "general",
-    createdAt: new Date().toISOString(),
-    createdBy: req.user!.user_id,
-    linkedGithubRepo: null
+function removeSocketFromPresence(socketId: string, workspaceId: string, broadcast = true) {
+  for (const [roomId, occupants] of roomPresence.entries()) {
+    const next = occupants
+      .map((occupant) => ({ ...occupant, socketIds: occupant.socketIds.filter((id) => id !== socketId) }))
+      .filter((occupant) => occupant.socketIds.length > 0);
+    if (next.length !== occupants.length || next.some((occupant, index) => occupant.socketIds.length !== occupants[index]?.socketIds.length)) {
+      roomPresence.set(roomId, next);
+      if (broadcast) broadcastRoomPresence(workspaceId, roomId, "leave");
+    }
+  }
+}
+
+function enterRoom(socketId: string, workspaceId: string, roomId: string) {
+  const room = rooms.find((candidate) => candidate.id === roomId && candidate.workspaceId === workspaceId);
+  if (!room) return null;
+  removeSocketFromPresence(socketId, workspaceId, false);
+  const occupants = roomPresence.get(roomId) || [];
+  const existing = occupants.find((occupant) => occupant.userId === currentUser.user_id);
+  if (existing) {
+    existing.socketIds = Array.from(new Set([...existing.socketIds, socketId]));
+  } else {
+    occupants.push({
+      roomId,
+      userId: currentUser.user_id,
+      userName: currentUser.name,
+      userPicture: currentUser.picture,
+      enteredAt: now(),
+      socketIds: [socketId],
+    });
+  }
+  roomPresence.set(roomId, occupants);
+  broadcastRoomPresence(workspaceId, roomId, "enter");
+  return occupants;
+}
+
+function leaveRoom(socketId: string, workspaceId: string, roomId: string) {
+  const occupants = roomPresence.get(roomId) || [];
+  const next = occupants
+    .map((occupant) => ({ ...occupant, socketIds: occupant.socketIds.filter((id) => id !== socketId) }))
+    .filter((occupant) => occupant.socketIds.length > 0);
+  roomPresence.set(roomId, next);
+  broadcastRoomPresence(workspaceId, roomId, "leave");
+}
+
+async function resolveGithubMention(repo: string, number: number, workspaceId: string): Promise<GithubMentionData> {
+  if (!isValidRepo(repo)) {
+    return { repo, number, resolved: false, error: "invalid_repo", hint: "Use owner/repo#123." };
+  }
+
+  const cacheKey = `${workspaceId}:${repo}#${number}`;
+  const cached = githubCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.data;
+
+  const connection = githubConnections.find((c) => c.workspaceId === workspaceId);
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "Co-Work",
   };
-  channels.push(defaultChannel);
-  channelMembers.push({ channelId: defaultChannel.id, userId: req.user!.user_id, joinedAt: new Date().toISOString() });
+  if (connection) headers.Authorization = `Bearer ${decryptToken(connection.encryptedToken)}`;
 
-  res.status(201).json(newWorkspace);
-});
+  try {
+    const [owner, repoName] = repo.split("/");
+    const response = await fetch(`https://api.github.com/repos/${owner}/${repoName}/issues/${number}`, { headers });
+    if (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0") {
+      return { repo, number, resolved: false, error: "rate_limited", hint: "GitHub rate limit reached. Add a workspace token or try again later." };
+    }
+    if (response.status === 404) {
+      return { repo, number, resolved: false, error: "not_found_or_private", hint: "Issue/PR was not found, or the token cannot access this repo." };
+    }
+    if (!response.ok) {
+      return { repo, number, resolved: false, error: "github_error", hint: `GitHub returned ${response.status}.` };
+    }
 
-app.get("/api/workspaces/:id/members", (req: AuthRequest, res: Response) => {
-  const members = workspaceMembers.filter(m => m.workspaceId === req.params.id);
-  res.json(members);
-});
+    const issue = await response.json();
+    const data: GithubMentionData = {
+      repo,
+      number: issue.number,
+      title: issue.title,
+      state: issue.pull_request?.merged_at ? "merged" : issue.state,
+      author: issue.user?.login,
+      labels: Array.isArray(issue.labels) ? issue.labels.map((label: any) => label.name).filter(Boolean) : [],
+      url: issue.html_url,
+      kind: issue.pull_request ? "pull_request" : "issue",
+      resolved: true,
+    };
+    githubCache.set(cacheKey, { expiresAt: Date.now() + 60000, data });
+    return data;
+  } catch {
+    return { repo, number, resolved: false, error: "github_error", hint: "Could not reach GitHub from the server." };
+  }
+}
 
-app.post("/api/workspaces/:id/members", (req: AuthRequest, res: Response) => {
-  const { userId, role } = req.body;
-  if (!userId) return res.status(400).json({ error: "userId is required" });
-  
-  const newMember: WorkspaceMember = {
-    workspaceId: req.params.id,
-    userId,
-    role: role || "member",
-    joinedAt: new Date().toISOString()
+async function parseMentions(content: string, channel: Channel): Promise<MessageMention[]> {
+  const mentions: MessageMention[] = [];
+  const seenGithub = new Set<string>();
+
+  for (const match of content.matchAll(/@github\s+([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#(\d+)/g)) {
+    const repo = match[1];
+    const number = Number(match[2]);
+    const key = `${repo}#${number}`;
+    if (seenGithub.has(key)) continue;
+    seenGithub.add(key);
+    mentions.push({ type: "github", value: key, data: await resolveGithubMention(repo, number, channel.workspaceId) });
+  }
+
+  for (const match of content.matchAll(/(^|[\s(])#(\d+)\b/g)) {
+    const number = Number(match[2]);
+    if (!channel.linkedGithubRepo) {
+      mentions.push({ type: "github", value: `#${number}`, data: { repo: "", number, resolved: false, error: "unlinked_repo", hint: "Link a repo to resolve #123." } });
+      continue;
+    }
+    const key = `${channel.linkedGithubRepo}#${number}`;
+    if (seenGithub.has(key)) continue;
+    seenGithub.add(key);
+    mentions.push({ type: "github", value: key, data: await resolveGithubMention(channel.linkedGithubRepo, number, channel.workspaceId) });
+  }
+
+  for (const match of content.matchAll(/@([A-Za-z][A-Za-z0-9_.-]{1,40})/g)) {
+    if (match[0] !== "@github") mentions.push({ type: "user", value: match[1] });
+  }
+
+  return mentions;
+}
+
+type MeetingWebhookPayload = {
+  eventType: "chunk" | "end";
+  workspaceId: string;
+  meetingId: string;
+  speaker?: string;
+  text?: string;
+  timestamp?: string;
+};
+
+function validateMeetingWebhookPayload(body: any): { ok: true; payload: MeetingWebhookPayload } | { ok: false; reason: string } {
+  if (!body || typeof body !== "object") return { ok: false, reason: "Payload must be an object" };
+  if (body.eventType !== "chunk" && body.eventType !== "end") return { ok: false, reason: "eventType must be chunk or end" };
+  if (typeof body.workspaceId !== "string" || !body.workspaceId.trim()) return { ok: false, reason: "workspaceId is required" };
+  if (typeof body.meetingId !== "string" || !body.meetingId.trim()) return { ok: false, reason: "meetingId is required" };
+  if (body.eventType === "chunk") {
+    if (typeof body.speaker !== "string" || !body.speaker.trim()) return { ok: false, reason: "speaker is required for chunks" };
+    if (typeof body.text !== "string" || !body.text.trim()) return { ok: false, reason: "text is required for chunks" };
+    if (typeof body.timestamp !== "string" || Number.isNaN(Date.parse(body.timestamp))) return { ok: false, reason: "timestamp must be an ISO date string" };
+  }
+  return { ok: true, payload: body };
+}
+
+function getOrCreateTranscript(workspaceId: string, meetingId: string) {
+  let transcript = meetingTranscripts.find((item) => item.workspaceId === workspaceId && item.meetingId === meetingId);
+  if (!transcript) {
+    transcript = {
+      id: makeId("meeting"),
+      workspaceId,
+      meetingId,
+      chunks: [],
+      startedAt: now(),
+      endedAt: null,
+      summaries: [],
+      lastSummarizedChunkIndex: 0,
+    };
+    meetingTranscripts.push(transcript);
+  }
+  return transcript;
+}
+
+function validateMeetingSummaryJson(value: any): value is { summary: string } {
+  return !!value && typeof value === "object" && typeof value.summary === "string" && value.summary.trim().length > 0;
+}
+
+async function summarizeTranscript(transcript: MeetingTranscript, force = false) {
+  const newChunks = transcript.chunks.slice(transcript.lastSummarizedChunkIndex);
+  if (!force && newChunks.length < 2) return null;
+  if (newChunks.length === 0 && transcript.summaries.length > 0) return transcript.summaries.at(-1) || null;
+
+  const previousSummary = transcript.summaries.at(-1)?.summary || "";
+  const chunkText = newChunks.map((chunk) => `[${chunk.timestamp}] ${chunk.speaker}: ${chunk.text}`).join("\n");
+  const schema = `{ "summary": "string" }`;
+  const ai = getGemini();
+  let summary = "";
+  let status: MeetingSummaryVersion["status"] = "ai-generated";
+
+  if (ai) {
+    try {
+      const result = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: [{
+          role: "user",
+          parts: [{ text: `Return only valid JSON matching this schema: ${schema}\nPrior running summary:\n${previousSummary || "(none)"}\nNew transcript chunks:\n${chunkText}\nProduce a concise running meeting summary that incorporates the new chunks without re-summarizing from scratch.` }],
+        }],
+      });
+      const parsed = JSON.parse(result.text || "{}");
+      if (validateMeetingSummaryJson(parsed)) summary = parsed.summary.trim();
+    } catch (error) {
+      console.error("Meeting summarization failed; storing fallback summary", error);
+    }
+  }
+
+  if (!summary) {
+    status = "fallback";
+    const additions = newChunks.map((chunk) => `${chunk.speaker}: ${chunk.text}`).join(" ");
+    summary = [previousSummary, additions].filter(Boolean).join("\n").slice(0, 1800) || "No transcript content summarized yet.";
+  }
+
+  const version: MeetingSummaryVersion = {
+    id: makeId("summary"),
+    generatedAt: now(),
+    summary,
+    sourceChunkCount: transcript.chunks.length,
+    status,
   };
-  workspaceMembers.push(newMember);
-  res.status(201).json(newMember);
+  transcript.summaries.push(version);
+  transcript.lastSummarizedChunkIndex = transcript.chunks.length;
+  io.to(`workspace:${transcript.workspaceId}`).emit("meeting:summary", { transcript, version });
+  return version;
+}
+
+function todayIsoDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function validateDigestJson(value: any): value is { mergedSummary: string } {
+  return !!value && typeof value === "object" && typeof value.mergedSummary === "string" && value.mergedSummary.trim().length > 0;
+}
+
+async function generateStandupDigest(workspaceId: string, date: string) {
+  const entries = standupEntries.filter((entry) => entry.workspaceId === workspaceId && entry.date === date);
+  if (entries.length === 0) return null;
+
+  const schema = `{ "mergedSummary": "string" }`;
+  const entryText = entries.map((entry) => `- ${entry.userName} (${entry.userId}): ${entry.content}`).join("\n");
+  const ai = getGemini();
+  let mergedSummary = "";
+  let status: StandupDigest["status"] = "ai-generated";
+
+  if (ai) {
+    try {
+      const result = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: [{
+          role: "user",
+          parts: [{ text: `Return only valid JSON matching this schema: ${schema}\nMerge these standup updates into one coherent digest grouped by theme/project. Preserve attribution explicitly: every claim, blocker, or next step must name who said it.\nStandup entries:\n${entryText}` }],
+        }],
+      });
+      const parsed = JSON.parse(result.text || "{}");
+      if (validateDigestJson(parsed)) mergedSummary = parsed.mergedSummary.trim();
+    } catch (error) {
+      console.error("Standup digest generation failed; storing fallback digest", error);
+    }
+  }
+
+  if (!mergedSummary) {
+    status = "fallback";
+    mergedSummary = entries.map((entry) => `${entry.userName}: ${entry.content}`).join("\n");
+  }
+
+  const digest: StandupDigest = {
+    id: makeId("standup_digest"),
+    workspaceId,
+    date,
+    mergedSummary,
+    generatedAt: now(),
+    status,
+  };
+  standupDigests = standupDigests.filter((item) => !(item.workspaceId === workspaceId && item.date === date));
+  standupDigests.push(digest);
+  io.to(`workspace:${workspaceId}`).emit("standup:digest", { digest });
+  return digest;
+}
+
+function githubContextForWorkspace(workspaceId: string) {
+  return teamMessages
+    .filter((m) => channels.find((c) => c.id === m.channelId)?.workspaceId === workspaceId)
+    .flatMap((m) => m.mentions.filter((mention) => mention.type === "github" && mention.data?.resolved).map((mention) => mention.data!))
+    .slice(-8);
+}
+
+io.on("connection", (socket) => {
+  const workspaceId = String(socket.handshake.query.workspaceId || defaultWorkspaceId);
+  socket.join(`workspace:${workspaceId}`);
+  socket.emit("presence:join", { workspaceId, userId: currentUser.user_id });
+  socket.emit("room:presence", { event: "snapshot", rooms: roomSnapshot(workspaceId) });
+
+  socket.on("channel:join", (channelId: string) => socket.join(`channel:${channelId}`));
+  socket.on("channel:leave", (channelId: string) => socket.leave(`channel:${channelId}`));
+  socket.on("typing:start", (payload) => socket.to(`channel:${payload.channelId}`).emit("typing:start", { ...payload, userId: currentUser.user_id }));
+  socket.on("typing:stop", (payload) => socket.to(`channel:${payload.channelId}`).emit("typing:stop", { ...payload, userId: currentUser.user_id }));
+  socket.on("room:enter", ({ roomId }: { roomId: string }) => enterRoom(socket.id, workspaceId, roomId));
+  socket.on("room:leave", ({ roomId }: { roomId: string }) => leaveRoom(socket.id, workspaceId, roomId));
+  socket.on("disconnect", () => {
+    io.to(`workspace:${workspaceId}`).emit("presence:leave", { workspaceId, userId: currentUser.user_id });
+    const timerKey = `${workspaceId}:${socket.id}`;
+    disconnectGraceTimers.set(timerKey, setTimeout(() => {
+      removeSocketFromPresence(socket.id, workspaceId);
+      disconnectGraceTimers.delete(timerKey);
+    }, 10000));
+  });
 });
 
-app.get("/api/workspaces/:id/channels", (req: AuthRequest, res: Response) => {
-  const wsChannels = channels.filter(c => c.workspaceId === req.params.id);
-  res.json(wsChannels);
+app.use(["/api", "/tasks", "/notes", "/calendar", "/gmail", "/sessions", "/chat"], authMiddleware);
+
+app.get("/health", (_req, res) => res.json({ status: "ok", version: "1.0.0", timestamp: now() }));
+
+app.get("/api/workspaces", (req: AuthRequest, res) => {
+  const ids = workspaceMembers.filter((m) => m.userId === req.user?.user_id).map((m) => m.workspaceId);
+  res.json(workspaces.filter((w) => ids.includes(w.id)));
 });
 
-app.post("/api/workspaces/:id/channels", (req: AuthRequest, res: Response) => {
-  const { name } = req.body;
+app.post("/api/workspaces", (req: AuthRequest, res) => {
+  const name = String(req.body.name || "").trim();
   if (!name) return res.status(400).json({ error: "Name is required" });
-
-  const newChannel: Channel = {
-    id: `chan_${Date.now()}`,
-    workspaceId: req.params.id,
-    name,
-    createdAt: new Date().toISOString(),
-    createdBy: req.user!.user_id,
-    linkedGithubRepo: null
-  };
-  channels.push(newChannel);
-  channelMembers.push({ channelId: newChannel.id, userId: req.user!.user_id, joinedAt: new Date().toISOString() });
-  
-  res.status(201).json(newChannel);
+  const workspace: Workspace = { id: makeId("ws"), name, createdAt: now(), ownerId: req.user!.user_id };
+  const channel: Channel = { id: makeId("chan"), workspaceId: workspace.id, name: "general", createdAt: now(), createdBy: req.user!.user_id, linkedGithubRepo: null };
+  workspaces.push(workspace);
+  workspaceMembers.push({ workspaceId: workspace.id, userId: req.user!.user_id, role: "owner", joinedAt: now() });
+  channels.push(channel);
+  channelMembers.push({ channelId: channel.id, userId: req.user!.user_id, joinedAt: now() });
+  rooms.push(
+    { id: makeId("room"), workspaceId: workspace.id, name: "Design", createdAt: now() },
+    { id: makeId("room"), workspaceId: workspace.id, name: "Standup", createdAt: now() },
+    { id: makeId("room"), workspaceId: workspace.id, name: "Focus", createdAt: now() },
+  );
+  res.status(201).json({ workspace, defaultChannel: channel });
 });
 
-app.get("/api/channels/:id/members", (req: AuthRequest, res: Response) => {
-  const members = channelMembers.filter(m => m.channelId === req.params.id);
-  res.json(members);
+app.patch("/api/workspaces/:id", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const workspace = workspaces.find((w) => w.id === req.params.id)!;
+  workspace.name = String(req.body.name || workspace.name).trim();
+  res.json(workspace);
 });
 
-// Health
-app.get("/health", (_req: Request, res: Response) => {
+app.delete("/api/workspaces/:id", (req: AuthRequest, res) => {
+  const workspace = workspaces.find((w) => w.id === req.params.id);
+  if (!workspace) return res.status(404).json({ error: "Workspace not found" });
+  if (workspace.ownerId !== req.user?.user_id) return res.status(403).json({ error: "Only owners can delete workspaces" });
+  if (workspace.id === defaultWorkspaceId) return res.status(400).json({ error: "Personal workspace cannot be deleted" });
+  workspaces = workspaces.filter((w) => w.id !== workspace.id);
+  workspaceMembers = workspaceMembers.filter((m) => m.workspaceId !== workspace.id);
+  const removedChannels = channels.filter((c) => c.workspaceId === workspace.id).map((c) => c.id);
+  const removedRooms = rooms.filter((r) => r.workspaceId === workspace.id).map((r) => r.id);
+  channels = channels.filter((c) => c.workspaceId !== workspace.id);
+  rooms = rooms.filter((r) => r.workspaceId !== workspace.id);
+  channelMembers = channelMembers.filter((m) => !removedChannels.includes(m.channelId));
+  teamMessages = teamMessages.filter((m) => !removedChannels.includes(m.channelId));
+  removedRooms.forEach((roomId) => roomPresence.delete(roomId));
+  res.json({ result: "ok" });
+});
+
+app.get("/api/workspaces/:id/rooms", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  res.json(rooms.filter((room) => room.workspaceId === req.params.id));
+});
+
+app.post("/api/workspaces/:id/rooms", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const name = String(req.body.name || "").trim();
+  if (!name) return res.status(400).json({ error: "Name is required" });
+  const room: Room = { id: makeId("room"), workspaceId: req.params.id, name, createdAt: now() };
+  rooms.push(room);
+  res.status(201).json(room);
+});
+
+app.patch("/api/rooms/:roomId", (req: AuthRequest, res) => {
+  const room = roomForRequest(req, res);
+  if (!room) return;
+  room.name = String(req.body.name || room.name).trim();
+  res.json(room);
+});
+
+app.delete("/api/rooms/:roomId", (req: AuthRequest, res) => {
+  const room = roomForRequest(req, res);
+  if (!room) return;
+  rooms = rooms.filter((candidate) => candidate.id !== room.id);
+  roomPresence.delete(room.id);
+  broadcastRoomPresence(room.workspaceId, room.id, "leave");
+  res.json({ result: "ok" });
+});
+
+app.get("/api/workspaces/:id/presence/rooms", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  res.json({ rooms: roomSnapshot(req.params.id), generatedAt: now() });
+});
+
+/*
+Meeting transcript webhook contract.
+External bot/service POSTs JSON to /api/webhooks/meeting-transcript:
+{
+  "eventType": "chunk",
+  "workspaceId": "ws_123",
+  "meetingId": "meet_2026_09_16_design",
+  "speaker": "Raj",
+  "text": "I can follow up on the API contract today.",
+  "timestamp": "2026-09-16T10:32:00.000Z"
+}
+To end a meeting, send { "eventType": "end", "workspaceId": "...", "meetingId": "..." }.
+Audio capture, bot auth, and speech-to-text are intentionally out of scope here.
+*/
+app.post("/api/webhooks/meeting-transcript", async (req: Request, res: Response) => {
+  const validation = validateMeetingWebhookPayload(req.body);
+  if (!validation.ok) {
+    console.warn("Skipped malformed meeting webhook payload:", validation.reason, req.body);
+    return res.status(202).json({ accepted: false, skipped: true, reason: validation.reason });
+  }
+
+  const { payload } = validation;
+  if (!workspaceMembers.some((member) => member.workspaceId === payload.workspaceId)) {
+    console.warn("Skipped meeting webhook for unknown workspace:", payload.workspaceId);
+    return res.status(202).json({ accepted: false, skipped: true, reason: "Unknown workspace" });
+  }
+
+  const transcript = getOrCreateTranscript(payload.workspaceId, payload.meetingId);
+  if (payload.eventType === "chunk") {
+    transcript.chunks.push({ speaker: payload.speaker!, text: payload.text!, timestamp: payload.timestamp! });
+    const version = await summarizeTranscript(transcript);
+    io.to(`workspace:${payload.workspaceId}`).emit("meeting:chunk", { transcript });
+    return res.status(202).json({ accepted: true, transcriptId: transcript.id, summarized: !!version });
+  }
+
+  transcript.endedAt = transcript.endedAt || now();
+  const version = await summarizeTranscript(transcript, true);
+  return res.status(202).json({ accepted: true, transcriptId: transcript.id, ended: true, summarized: !!version });
+});
+
+app.get("/api/workspaces/:id/meeting-transcripts", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
   res.json({
-    status: "ok",
-    version: "1.0.0",
-    timestamp: new Date().toISOString(),
+    transcripts: meetingTranscripts.filter((transcript) => transcript.workspaceId === req.params.id),
   });
 });
 
-// Auth
+app.get("/api/meeting-transcripts/:transcriptId", (req: AuthRequest, res) => {
+  const transcript = meetingTranscripts.find((item) => item.id === req.params.transcriptId && item.workspaceId === req.workspace?.id);
+  if (!transcript) return res.status(404).json({ error: "Meeting transcript not found" });
+  res.json(transcript);
+});
+
+app.post("/api/workspaces/:id/standup-entries", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const content = String(req.body.content || "").trim();
+  const date = String(req.body.date || todayIsoDate()).slice(0, 10);
+  if (!content) return res.status(400).json({ error: "Content is required" });
+  const entry: StandupEntry = {
+    id: makeId("standup"),
+    workspaceId: req.params.id,
+    userId: req.user!.user_id,
+    userName: req.user!.name,
+    date,
+    content,
+    createdAt: now(),
+  };
+  standupEntries.push(entry);
+  io.to(`workspace:${req.params.id}`).emit("standup:entry", { entry });
+  res.status(201).json(entry);
+});
+
+app.get("/api/workspaces/:id/standup-entries", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const date = String(req.query.date || todayIsoDate()).slice(0, 10);
+  const entries = standupEntries.filter((entry) => entry.workspaceId === req.params.id && entry.date === date);
+  res.json({ entries, count: entries.length });
+});
+
+app.post("/api/workspaces/:id/standup-digests", async (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const date = String(req.body.date || todayIsoDate()).slice(0, 10);
+  const digest = await generateStandupDigest(req.params.id, date);
+  if (!digest) return res.status(404).json({ error: "No standup entries found for date" });
+  res.status(201).json(digest);
+});
+
+app.get("/api/workspaces/:id/standup-digests", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const date = req.query.date ? String(req.query.date).slice(0, 10) : null;
+  const digests = standupDigests.filter((digest) => digest.workspaceId === req.params.id && (!date || digest.date === date));
+  res.json({ digests });
+});
+
+app.get("/api/workspaces/:id/members", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  res.json(workspaceMembers.filter((m) => m.workspaceId === req.params.id));
+});
+
+app.post("/api/workspaces/:id/members", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const userId = String(req.body.userId || "").trim();
+  const role = String(req.body.role || "member");
+  if (!userId || !isValidRole(role)) return res.status(400).json({ error: "Valid userId and role are required" });
+  if (workspaceMembers.some((m) => m.workspaceId === req.params.id && m.userId === userId)) return res.status(409).json({ error: "Member already exists" });
+  const member: WorkspaceMember = { workspaceId: req.params.id, userId, role, joinedAt: now() };
+  workspaceMembers.push(member);
+  res.status(201).json(member);
+});
+
+app.patch("/api/workspaces/:id/members/:userId", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const role = String(req.body.role || "");
+  if (!isValidRole(role)) return res.status(400).json({ error: "Valid role is required" });
+  const member = workspaceMembers.find((m) => m.workspaceId === req.params.id && m.userId === req.params.userId);
+  if (!member) return res.status(404).json({ error: "Member not found" });
+  member.role = role;
+  res.json(member);
+});
+
+app.delete("/api/workspaces/:id/members/:userId", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  workspaceMembers = workspaceMembers.filter((m) => !(m.workspaceId === req.params.id && m.userId === req.params.userId));
+  res.json({ result: "ok" });
+});
+
+app.get("/api/workspaces/:id/channels", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  res.json(channels.filter((c) => c.workspaceId === req.params.id));
+});
+
+app.post("/api/workspaces/:id/channels", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const name = String(req.body.name || "").trim();
+  if (!name) return res.status(400).json({ error: "Name is required" });
+  const linkedGithubRepo = req.body.linkedGithubRepo ? String(req.body.linkedGithubRepo).trim() : null;
+  if (linkedGithubRepo && !isValidRepo(linkedGithubRepo)) return res.status(400).json({ error: "linkedGithubRepo must be owner/repo" });
+  const channel: Channel = { id: makeId("chan"), workspaceId: req.params.id, name, createdAt: now(), createdBy: req.user!.user_id, linkedGithubRepo };
+  channels.push(channel);
+  channelMembers.push({ channelId: channel.id, userId: req.user!.user_id, joinedAt: now() });
+  res.status(201).json(channel);
+});
+
+app.patch("/api/channels/:channelId", (req: AuthRequest, res) => {
+  const channel = channelForRequest(req, res);
+  if (!channel) return;
+  if (req.body.name !== undefined) channel.name = String(req.body.name).trim() || channel.name;
+  if (req.body.linkedGithubRepo !== undefined) {
+    const repo = String(req.body.linkedGithubRepo || "").trim();
+    if (repo && !isValidRepo(repo)) return res.status(400).json({ error: "linkedGithubRepo must be owner/repo" });
+    channel.linkedGithubRepo = repo || null;
+  }
+  res.json(channel);
+});
+
+app.delete("/api/channels/:channelId", (req: AuthRequest, res) => {
+  const channel = channelForRequest(req, res);
+  if (!channel) return;
+  channels = channels.filter((c) => c.id !== channel.id);
+  channelMembers = channelMembers.filter((m) => m.channelId !== channel.id);
+  teamMessages = teamMessages.filter((m) => m.channelId !== channel.id);
+  res.json({ result: "ok" });
+});
+
+app.get("/api/channels/:channelId/members", (req: AuthRequest, res) => {
+  if (!channelForRequest(req, res)) return;
+  res.json(channelMembers.filter((m) => m.channelId === req.params.channelId));
+});
+
+app.post("/api/channels/:channelId/members", (req: AuthRequest, res) => {
+  if (!channelForRequest(req, res)) return;
+  const userId = String(req.body.userId || "").trim();
+  if (!userId) return res.status(400).json({ error: "userId is required" });
+  if (channelMembers.some((m) => m.channelId === req.params.channelId && m.userId === userId)) return res.status(409).json({ error: "Channel member already exists" });
+  const member: ChannelMember = { channelId: req.params.channelId, userId, joinedAt: now() };
+  channelMembers.push(member);
+  res.status(201).json(member);
+});
+
+app.delete("/api/channels/:channelId/members/:userId", (req: AuthRequest, res) => {
+  if (!channelForRequest(req, res)) return;
+  channelMembers = channelMembers.filter((m) => !(m.channelId === req.params.channelId && m.userId === req.params.userId));
+  res.json({ result: "ok" });
+});
+
+app.get("/api/channels/:channelId/messages", (req: AuthRequest, res) => {
+  if (!channelForRequest(req, res)) return;
+  const limit = Math.min(parseInt(String(req.query.limit || "50"), 10), 100);
+  const before = req.query.before ? Date.parse(String(req.query.before)) : Number.POSITIVE_INFINITY;
+  const messages = teamMessages.filter((m) => m.channelId === req.params.channelId && Date.parse(m.createdAt) < before).slice(-limit);
+  res.json({ messages, count: messages.length });
+});
+
+app.post("/api/channels/:channelId/messages", async (req: AuthRequest, res) => {
+  const channel = channelForRequest(req, res);
+  if (!channel) return;
+  const content = String(req.body.content || "").trim();
+  if (!content) return res.status(400).json({ error: "Content is required" });
+  const message: TeamMessage = {
+    id: makeId("msg"),
+    channelId: channel.id,
+    authorId: req.user!.user_id,
+    authorName: req.user!.name,
+    content,
+    createdAt: now(),
+    editedAt: null,
+    mentions: await parseMentions(content, channel),
+  };
+  teamMessages.push(message);
+  io.to(`channel:${channel.id}`).emit("message:new", message);
+  res.status(201).json(message);
+});
+
+app.patch("/api/channels/:channelId/messages/:messageId", async (req: AuthRequest, res) => {
+  const channel = channelForRequest(req, res);
+  if (!channel) return;
+  const message = teamMessages.find((m) => m.id === req.params.messageId && m.channelId === channel.id);
+  if (!message) return res.status(404).json({ error: "Message not found" });
+  if (message.authorId !== req.user?.user_id) return res.status(403).json({ error: "Only the author can edit this message" });
+  message.content = String(req.body.content || message.content).trim();
+  message.editedAt = now();
+  message.mentions = await parseMentions(message.content, channel);
+  io.to(`channel:${channel.id}`).emit("message:edit", message);
+  res.json(message);
+});
+
+app.delete("/api/channels/:channelId/messages/:messageId", (req: AuthRequest, res) => {
+  const channel = channelForRequest(req, res);
+  if (!channel) return;
+  const message = teamMessages.find((m) => m.id === req.params.messageId && m.channelId === channel.id);
+  if (!message) return res.status(404).json({ error: "Message not found" });
+  if (message.authorId !== req.user?.user_id) return res.status(403).json({ error: "Only the author can delete this message" });
+  teamMessages = teamMessages.filter((m) => m.id !== message.id);
+  io.to(`channel:${channel.id}`).emit("message:delete", { id: message.id, channelId: channel.id });
+  res.json({ result: "ok" });
+});
+
+app.get("/api/workspaces/:id/github", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const connection = githubConnections.find((c) => c.workspaceId === req.params.id);
+  res.json({ connected: !!connection, updatedAt: connection?.updatedAt || null });
+});
+
+app.put("/api/workspaces/:id/github", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const token = String(req.body.token || "").trim();
+  if (!token) return res.status(400).json({ error: "GitHub token is required" });
+  githubConnections = githubConnections.filter((c) => c.workspaceId !== req.params.id);
+  githubConnections.push({ workspaceId: req.params.id, encryptedToken: encryptToken(token), updatedAt: now() });
+  res.json({ connected: true, updatedAt: now() });
+});
+
+app.delete("/api/workspaces/:id/github", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  githubConnections = githubConnections.filter((c) => c.workspaceId !== req.params.id);
+  res.json({ connected: false });
+});
+
 const handleLogin = (req: Request, res: Response) => {
   const token = `cowork_token_${Date.now()}`;
   const email = (req.body?.email as string) || (req.query?.email as string) || currentUser.email;
   const name = (req.body?.name as string) || (req.query?.name as string) || currentUser.name;
-
-  const user = {
-    ...currentUser,
-    email,
-    name,
-    last_login: new Date().toISOString(),
-  };
-
-  const userJson = encodeURIComponent(JSON.stringify(user));
-  const authorization_url = `/?auth_success=true#access_token=${token}&user=${userJson}`;
-
-  res.json({
-    success: true,
-    token,
-    user,
-    authorization_url,
-    state: "cowork_active_state",
-  });
+  const user = { ...currentUser, email, name, last_login: now() };
+  res.json({ success: true, token, user, authorization_url: `/?auth_success=true#access_token=${token}&user=${encodeURIComponent(JSON.stringify(user))}`, state: "cowork_active_state" });
 };
 
 app.get("/auth/login", handleLogin);
 app.post("/auth/login", handleLogin);
+app.get("/auth/me", (_req, res) => res.json(currentUser));
+app.post("/auth/logout", (_req, res) => res.json({ status: "ok" }));
 
-app.get("/auth/me", (req: Request, res: Response) => {
-  const authHeader = req.headers.authorization;
-  if (authHeader || req.query.token) {
-    return res.json(currentUser);
-  }
-  // If no auth header, return user by default so user can directly use workspace
-  res.json(currentUser);
-});
-
-app.post("/auth/logout", (_req: Request, res: Response) => {
-  res.json({ status: "ok" });
-});
-
-// Sessions
-app.post("/sessions", (_req: Request, res: Response) => {
-  const sessionId = `session_${Date.now()}`;
-  const newSession: ChatSession = {
-    session_id: sessionId,
-    title: "New Conversation",
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-    messages: [
-      {
-        role: "assistant",
-        content: "Hello! I am Co-Work. How can I assist you with your schedule, tasks, or emails?",
-        timestamp: new Date().toISOString(),
-      },
-    ],
-  };
-  sessions.set(sessionId, newSession);
+app.post("/sessions", (req: AuthRequest, res) => {
+  const sessionId = makeId("session");
+  const session: ChatSession = { session_id: sessionId, title: "New Conversation", created_at: now(), updated_at: now(), messages: [{ role: "assistant", content: "Hello! I am Co-Work. How can I assist?", timestamp: now() }], workspaceId: req.workspace!.id };
+  sessions.set(sessionId, session);
   res.json({ session_id: sessionId });
 });
 
-app.get("/sessions", (req: Request, res: Response) => {
-  const limit = parseInt(req.query.limit as string) || 10;
-  const sessionList = Array.from(sessions.values())
-    .map((s) => ({
-      session_id: s.session_id,
-      title: s.title,
-      created_at: s.created_at,
-      updated_at: s.updated_at,
-      last_message: s.messages[s.messages.length - 1]?.content || "",
-    }))
-    .reverse()
-    .slice(0, limit);
-
-  res.json({
-    sessions: sessionList,
-    count: sessionList.length,
-  });
+app.get("/sessions", (req: AuthRequest, res) => {
+  const limit = parseInt(String(req.query.limit || "10"), 10);
+  const sessionList = Array.from(sessions.values()).filter((s) => s.workspaceId === req.workspace?.id).map((s) => ({ session_id: s.session_id, title: s.title, created_at: s.created_at, updated_at: s.updated_at, last_message: s.messages.at(-1)?.content || "" })).reverse().slice(0, limit);
+  res.json({ sessions: sessionList, count: sessionList.length });
 });
 
-app.delete("/sessions/:id", (req: Request, res: Response) => {
-  sessions.delete(req.params.id);
+app.delete("/sessions/:id", (req: AuthRequest, res) => {
+  const session = sessions.get(req.params.id);
+  if (session?.workspaceId === req.workspace?.id) sessions.delete(req.params.id);
   res.json({ result: "ok", message: "Session deleted" });
 });
 
-app.get("/chat/sessions/:id", (req: Request, res: Response) => {
+app.get("/chat/sessions/:id", (req: AuthRequest, res) => {
   const session = sessions.get(req.params.id);
-  if (!session) {
-    return res.json({
-      session_id: req.params.id,
-      messages: [],
-      count: 0,
-    });
-  }
-  res.json({
-    session_id: session.session_id,
-    messages: session.messages,
-    count: session.messages.length,
-  });
+  if (!session || session.workspaceId !== req.workspace?.id) return res.json({ session_id: req.params.id, messages: [], count: 0 });
+  res.json({ session_id: session.session_id, messages: session.messages, count: session.messages.length });
 });
 
-// Chat POST (handles multipart/form-data with upload.any() or JSON)
-app.post("/chat", upload.any(), async (req: Request, res: Response) => {
-  try {
-    const message = req.body.message || "";
-    let sessionId = req.body.session_id;
-
-    if (!sessionId || !sessions.has(sessionId)) {
-      sessionId = `session_${Date.now()}`;
-      sessions.set(sessionId, {
-        session_id: sessionId,
-        title: message ? message.slice(0, 30) + (message.length > 30 ? "..." : "") : "New Conversation",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        messages: [],
-      });
-    }
-
-    const session = sessions.get(sessionId)!;
-
-    // Add user message
-    session.messages.push({
-      role: "user",
-      content: message,
-      timestamp: new Date().toISOString(),
-    });
-    session.updated_at = new Date().toISOString();
-
-    let replyText = "";
-    const ai = getGemini();
-
-    if (ai) {
-      try {
-        const promptContext = `You are Co-Work, an elite proactive Chief of Staff and workspace assistant.
-The user's current environment has:
-- ${events.length} calendar events today: ${events.map((e) => `"${e.summary}" at ${new Date(e.start).toLocaleTimeString()}`).join(", ")}
-- ${tasks.filter((t) => !t.is_completed).length} pending tasks: ${tasks.filter((t) => !t.is_completed).map((t) => `"${t.title}"`).join(", ")}
-- ${emails.filter((e) => e.is_unread).length} unread emails: ${emails.filter((e) => e.is_unread).map((e) => `from ${e.from}: "${e.subject}"`).join("; ")}
-
-Be proactive, concise, articulate, and helpful. Suggest concrete next steps or actions when relevant.`;
-
-        const chatHistoryForGemini = session.messages.slice(-8).map((m) => ({
-          role: m.role === "assistant" ? "model" : "user",
-          parts: [{ text: m.content }],
-        }));
-
-        const result = await ai.models.generateContent({
-          model: "gemini-3.1-pro-preview",
-          contents: chatHistoryForGemini,
-          config: {
-            systemInstruction: promptContext,
-          },
-        });
-
-        replyText = result.text || "I have received your request and processed it across your workspace.";
-      } catch (err) {
-        console.error("Gemini API call failed:", err);
-        replyText = "Error: Failed to generate a response from the AI model. Please check your API key and model availability.";
-      }
-    }
-
-    const assistantMsg: ChatMessage = {
-      role: "assistant",
-      content: replyText,
-      timestamp: new Date().toISOString(),
-    };
-    session.messages.push(assistantMsg);
-
-    res.json({
-      response: replyText,
-      session_id: sessionId,
-      suggestions: [
-        "Review today's schedule",
-        "Check unread emails",
-        "Add a high-priority task",
-      ],
-      execution_success: true,
-    });
-  } catch (err: any) {
-    console.error("Chat error:", err);
-    res.status(500).json({ error: "Failed to process chat message" });
+app.post("/chat", upload.any(), async (req: AuthRequest, res) => {
+  const message = req.body.message || "";
+  let sessionId = req.body.session_id;
+  if (!sessionId || !sessions.has(sessionId)) {
+    sessionId = makeId("session");
+    sessions.set(sessionId, { session_id: sessionId, title: message ? message.slice(0, 30) : "New Conversation", created_at: now(), updated_at: now(), messages: [], workspaceId: req.workspace!.id });
   }
+  const session = sessions.get(sessionId)!;
+  session.messages.push({ role: "user", content: message, timestamp: now() });
+  session.updated_at = now();
+  const githubContext = githubContextForWorkspace(req.workspace!.id);
+  let replyText = "I have received your request and processed it across your workspace.";
+  const ai = getGemini();
+  if (ai) {
+    try {
+      const promptContext = `You are Co-Work, a concise workspace assistant. Current workspace: ${req.workspace!.name}. Recent resolved GitHub mentions: ${JSON.stringify(githubContext)}. Pending tasks: ${getWorkspaceScoped(tasks, req).filter((t) => !t.is_completed).map((t) => t.title).join(", ")}.`;
+      const contents = session.messages.slice(-8).map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] }));
+      const result = await ai.models.generateContent({ model: "gemini-3.1-pro-preview", contents, config: { systemInstruction: promptContext } });
+      replyText = result.text || replyText;
+    } catch (err) {
+      console.error("Gemini API call failed:", err);
+      replyText = "Error: Failed to generate a response from the AI model. Please check your API key and model availability.";
+    }
+  }
+  session.messages.push({ role: "assistant", content: replyText, timestamp: now(), metadata: { githubContext } });
+  res.json({ response: replyText, session_id: sessionId, suggestions: ["Review today's schedule", "Check unread emails", "Add a high-priority task"], execution_success: true });
 });
 
-// Calendar
-app.get("/calendar/events", (req: Request, res: Response) => {
-  const query = req.query.query as string | undefined;
-  let filtered = events;
-  if (query) {
-    const q = query.toLowerCase();
-    filtered = filtered.filter(
-      (e) =>
-        e.summary.toLowerCase().includes(q) ||
-        (e.description && e.description.toLowerCase().includes(q))
-    );
-  }
+app.get("/calendar/events", (req: AuthRequest, res) => {
+  const query = String(req.query.query || "").toLowerCase();
+  let filtered = getWorkspaceScoped(events, req);
+  if (query) filtered = filtered.filter((e) => e.summary.toLowerCase().includes(query) || e.description.toLowerCase().includes(query));
   res.json({ events: filtered, count: filtered.length });
 });
 
-app.post("/calendar/events", (req: Request, res: Response) => {
-  const newEvent = {
-    id: `evt_${Date.now()}`,
-    summary: req.body.summary || "New Meeting",
-    start: req.body.start_time || req.body.start || new Date().toISOString(),
-    end: req.body.end_time || req.body.end || new Date(Date.now() + 3600000).toISOString(),
-    location: req.body.location || (req.body.add_google_meet ? "Google Meet" : "Virtual"),
-    description: req.body.description || "",
-    meet_link: req.body.add_google_meet ? "https://meet.google.com/zen-meet-new" : "",
-    attendees: req.body.attendees || ["askadhithiya@gmail.com"],
-  };
-  events.unshift(newEvent);
-  res.json(newEvent);
+app.post("/calendar/events", (req: AuthRequest, res) => {
+  const event = { id: makeId("evt"), summary: req.body.summary || "New Meeting", start: req.body.start_time || req.body.start || now(), end: req.body.end_time || req.body.end || new Date(Date.now() + 3600000).toISOString(), location: req.body.location || "Virtual", description: req.body.description || "", meet_link: req.body.add_google_meet ? "https://meet.google.com/zen-meet-new" : "", attendees: req.body.attendees || [currentUser.email], workspaceId: req.workspace!.id };
+  events.unshift(event);
+  res.json(event);
 });
 
-app.post("/calendar/quick-add", (req: Request, res: Response) => {
-  const text = req.body.text || "Meeting";
-  const newEvent = {
-    id: `evt_${Date.now()}`,
-    summary: text,
-    start: new Date(Date.now() + 3600000).toISOString(),
-    end: new Date(Date.now() + 7200000).toISOString(),
-    location: "Google Meet",
-    description: `Quick added: "${text}"`,
-    meet_link: "https://meet.google.com/zen-meet-quick",
-    attendees: ["askadhithiya@gmail.com"],
-  };
-  events.unshift(newEvent);
-  res.json(newEvent);
+app.post("/calendar/quick-add", (req: AuthRequest, res) => {
+  const event = { id: makeId("evt"), summary: req.body.text || "Meeting", start: new Date(Date.now() + 3600000).toISOString(), end: new Date(Date.now() + 7200000).toISOString(), location: "Google Meet", description: `Quick added: "${req.body.text || "Meeting"}"`, meet_link: "https://meet.google.com/zen-meet-quick", attendees: [currentUser.email], workspaceId: req.workspace!.id };
+  events.unshift(event);
+  res.json(event);
 });
 
-// Tasks
-app.get("/tasks", (req: Request, res: Response) => {
+app.get("/tasks", (req: AuthRequest, res) => {
   const showCompleted = req.query.show_completed === "true";
-  const filtered = showCompleted ? tasks : tasks.filter((t) => !t.is_completed);
+  const filtered = getWorkspaceScoped(tasks, req).filter((t) => showCompleted || !t.is_completed);
   res.json({ tasks: filtered, count: filtered.length });
 });
 
-app.post("/tasks", (req: Request, res: Response) => {
-  const newTask = {
-    id: `task_${Date.now()}`,
-    title: req.body.title || "Untitled Task",
-    notes: req.body.notes || "",
-    due: req.body.due_date || req.body.due || new Date(Date.now() + 86400000).toISOString(),
-    is_completed: false,
-    created_at: new Date().toISOString(),
-  };
-  tasks.unshift(newTask);
-  res.json(newTask);
+app.post("/tasks", (req: AuthRequest, res) => {
+  const task = { id: makeId("task"), title: req.body.title || "Untitled Task", notes: req.body.notes || "", due: req.body.due_date || req.body.due || new Date(Date.now() + 86400000).toISOString(), is_completed: false, created_at: now(), workspaceId: req.workspace!.id };
+  tasks.unshift(task);
+  res.json(task);
 });
 
-app.patch("/tasks/:id/complete", (req: Request, res: Response) => {
-  const task = tasks.find((t) => t.id === req.params.id);
-  if (task) {
-    task.is_completed = true;
-  }
+app.patch("/tasks/:id/complete", (req: AuthRequest, res) => {
+  const task = getWorkspaceScoped(tasks, req).find((t) => t.id === req.params.id);
+  if (task) task.is_completed = true;
   res.json(task || {});
 });
 
-app.patch("/tasks/:id/uncomplete", (req: Request, res: Response) => {
-  const task = tasks.find((t) => t.id === req.params.id);
-  if (task) {
-    task.is_completed = false;
-  }
+app.patch("/tasks/:id/uncomplete", (req: AuthRequest, res) => {
+  const task = getWorkspaceScoped(tasks, req).find((t) => t.id === req.params.id);
+  if (task) task.is_completed = false;
   res.json(task || {});
 });
 
-app.post("/tasks/reminder", (req: Request, res: Response) => {
-  const newTask = {
-    id: `task_${Date.now()}`,
-    title: req.body.title || "Reminder",
-    notes: req.body.notes || "",
-    due: req.body.remind_at || new Date().toISOString(),
-    is_completed: false,
-    created_at: new Date().toISOString(),
-  };
-  tasks.unshift(newTask);
-  res.json(newTask);
+app.post("/tasks/reminder", (req: AuthRequest, res) => {
+  const task = { id: makeId("task"), title: req.body.title || "Reminder", notes: req.body.notes || "", due: req.body.remind_at || now(), is_completed: false, created_at: now(), workspaceId: req.workspace!.id };
+  tasks.unshift(task);
+  res.json(task);
 });
 
-app.post("/tasks/edit", (req: Request, res: Response) => {
-  res.json({
-    status: "success",
-    task_payload: {
-      title: req.body.title,
-      description: req.body.description || null,
-      due: req.body.due || null,
-    },
-  });
-});
+app.post("/tasks/edit", (req, res) => res.json({ status: "success", task_payload: { title: req.body.title, description: req.body.description || null, due: req.body.due || null } }));
 
-// Notes
-app.get("/notes", (req: Request, res: Response) => {
-  const limit = parseInt(req.query.limit as string) || 20;
+app.get("/notes", (req: AuthRequest, res) => {
+  const limit = parseInt(String(req.query.limit || "20"), 10);
   const source = req.query.source as string;
-  let filtered = notes;
-  if (source) {
-    filtered = filtered.filter((n) => n.source === source);
-  }
+  let filtered = getWorkspaceScoped(notes, req);
+  if (source) filtered = filtered.filter((n) => n.source === source);
   res.json({ notes: filtered.slice(0, limit), count: filtered.length });
 });
 
-app.post("/notes", (req: Request, res: Response) => {
-  const newNote = {
-    note_id: `note_${Date.now()}`,
-    title: req.body.title || "Untitled Note",
-    content: req.body.content || "",
-    tags: req.body.tags || ["general"],
-    source: req.body.source || "user",
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
-  notes.unshift(newNote);
-  res.json(newNote);
+app.post("/notes", (req: AuthRequest, res) => {
+  const note = { note_id: makeId("note"), title: req.body.title || "Untitled Note", content: req.body.content || "", tags: req.body.tags || ["general"], source: req.body.source || "user", created_at: now(), updated_at: now(), workspaceId: req.workspace!.id };
+  notes.unshift(note);
+  res.json(note);
 });
 
-app.post("/notes/search", (req: Request, res: Response) => {
-  const q = (req.body.query || "").toLowerCase();
-  const filtered = notes.filter(
-    (n) =>
-      n.title.toLowerCase().includes(q) ||
-      n.content.toLowerCase().includes(q) ||
-      n.tags.some((t: string) => t.toLowerCase().includes(q))
-  );
+app.post("/notes/search", (req: AuthRequest, res) => {
+  const q = String(req.body.query || "").toLowerCase();
+  const filtered = getWorkspaceScoped(notes, req).filter((n) => n.title.toLowerCase().includes(q) || n.content.toLowerCase().includes(q) || n.tags.some((t) => t.toLowerCase().includes(q)));
   res.json({ notes: filtered, count: filtered.length });
 });
 
-// Gmail
-app.get("/gmail/messages", (req: Request, res: Response) => {
-  const maxResults = parseInt(req.query.max_results as string) || 10;
-  const q = req.query.query as string | undefined;
-  let filtered = emails;
-  if (q) {
-    const term = q.toLowerCase();
-    filtered = filtered.filter(
-      (e) =>
-        e.subject.toLowerCase().includes(term) ||
-        e.from.toLowerCase().includes(term) ||
-        e.snippet.toLowerCase().includes(term)
-    );
-  }
+app.get("/gmail/messages", (req: AuthRequest, res) => {
+  const maxResults = parseInt(String(req.query.max_results || "10"), 10);
+  const q = String(req.query.query || "").toLowerCase();
+  let filtered = getWorkspaceScoped(emails, req);
+  if (q) filtered = filtered.filter((e) => e.subject.toLowerCase().includes(q) || e.from.toLowerCase().includes(q) || e.snippet.toLowerCase().includes(q));
   res.json({ emails: filtered.slice(0, maxResults), count: filtered.length });
 });
 
-app.get("/gmail/messages/:id", (req: Request, res: Response) => {
-  const email = emails.find((e) => e.id === req.params.id);
-  if (!email) {
-    return res.status(404).json({ error: "Email not found" });
-  }
+app.get("/gmail/messages/:id", (req: AuthRequest, res) => {
+  const email = getWorkspaceScoped(emails, req).find((e) => e.id === req.params.id);
+  if (!email) return res.status(404).json({ error: "Email not found" });
   res.json(email);
 });
 
-app.post("/gmail/send", (req: Request, res: Response) => {
-  const newMail = {
-    id: `mail_${Date.now()}`,
-    from: `${currentUser.name} <${currentUser.email}>`,
-    subject: req.body.subject || "No Subject",
-    snippet: (req.body.body || "").slice(0, 80),
-    body_text: req.body.body || "",
-    body_html: req.body.html_body || `<p>${req.body.body || ""}</p>`,
-    is_unread: false,
-    date: new Date().toISOString(),
-  };
-  emails.unshift(newMail);
-  res.json({ status: "sent", id: newMail.id });
+app.post("/gmail/send", (req: AuthRequest, res) => {
+  const email = { id: makeId("mail"), from: `${currentUser.name} <${currentUser.email}>`, subject: req.body.subject || "No Subject", snippet: String(req.body.body || "").slice(0, 80), body_text: req.body.body || "", body_html: req.body.html_body || `<p>${req.body.body || ""}</p>`, is_unread: false, date: now(), workspaceId: req.workspace!.id };
+  emails.unshift(email);
+  res.json({ status: "sent", id: email.id });
 });
 
-// Briefing
-app.get("/agent/briefing", (_req: Request, res: Response) => {
-  const pendingTasks = tasks.filter((t) => !t.is_completed).length;
-  const todayEvents = events.length;
-  const unreadMails = emails.filter((e) => e.is_unread).length;
-  res.json({
-    status: "ready",
-    title: "Daily Catch-Up Briefing",
-    content: `Good morning! You have ${todayEvents} events on your schedule today, ${pendingTasks} active tasks, and ${unreadMails} unread messages requiring attention. Key highlight: Executive Sprint Review is coming up, and Sarah requested feedback on the product roadmap before 3 PM.`,
-    metadata: {
-      task_count: pendingTasks,
-      event_count: todayEvents,
-      unread_count: unreadMails,
-      last_updated: new Date().toISOString(),
-    },
-  });
+app.get("/agent/briefing", (req: AuthRequest, res) => {
+  const scopedTasks = getWorkspaceScoped(tasks, req);
+  const scopedEvents = getWorkspaceScoped(events, req);
+  const scopedEmails = getWorkspaceScoped(emails, req);
+  res.json({ status: "ready", title: "Daily Catch-Up Briefing", content: `Good morning! You have ${scopedEvents.length} events, ${scopedTasks.filter((t) => !t.is_completed).length} active tasks, and ${scopedEmails.filter((e) => e.is_unread).length} unread messages.`, metadata: { task_count: scopedTasks.length, event_count: scopedEvents.length, unread_count: scopedEmails.filter((e) => e.is_unread).length, last_updated: now() } });
 });
 
-// Preferences
-app.get("/preferences", (_req: Request, res: Response) => {
+app.get("/preferences", (_req, res) => res.json({ preferences: userPreferences, updated_at: userPreferences.updated_at }));
+app.patch("/preferences", (req, res) => {
+  userPreferences = { ...userPreferences, ...req.body, updated_at: now() };
   res.json({ preferences: userPreferences, updated_at: userPreferences.updated_at });
 });
 
-app.patch("/preferences", (req: Request, res: Response) => {
-  userPreferences = {
-    ...userPreferences,
-    ...req.body,
-    updated_at: new Date().toISOString(),
-  };
-  res.json({ preferences: userPreferences, updated_at: userPreferences.updated_at });
+app.get("/insights/priority-feed", (_req, res) => {
+  res.json({ status: "ready", items: [{ id: "feed_1", type: "email_action", action_type: "reply", ui_actions: ["reply", "task", "ignore"], title: "Action Required: Q3 Product Roadmap Feedback", from: "Sarah Chen <sarah.chen@techcorp.io>", summary: "Sarah needs your input before 3:00 PM today.", reason: "High priority deliverable", draft_reply: "Hi Sarah,\n\nI reviewed the roadmap and the scope allocations look accurate.\n\nBest,\nAdhithiya" }], metadata: { total: 1, generated_at: now() } });
 });
 
-// Priority Feed
-app.get("/insights/priority-feed", (_req: Request, res: Response) => {
-  const priorityItems = [
-    {
-      id: "feed_1",
-      type: "email_action",
-      action_type: "reply",
-      ui_actions: ["reply", "task", "ignore"],
-      title: "Action Required: Q3 Product Roadmap Feedback",
-      from: "Sarah Chen <sarah.chen@techcorp.io>",
-      summary: "Sarah needs your input and approval on the Q3 Product Roadmap revisions by 3:00 PM today.",
-      reason: "High priority client deliverable due today",
-      draft_reply:
-        "Hi Sarah,\n\nI reviewed the roadmap and the scope allocations look accurate. Proceed with the current plan.\n\nBest regards,\nAdhithiya",
-      task_payload: {
-        title: "Review Q3 Product Roadmap",
-        description: "Provide sign-off before 3 PM",
-        due: new Date(Date.now() + 1000 * 60 * 60 * 5).toISOString(),
-      },
-    },
-    {
-      id: "feed_2",
-      type: "meeting_prep",
-      status: "ready",
-      title: "Prep for Executive Sprint Review",
-      summary: "Review key progress deliverables, API performance benchmarks, and user adoption stats.",
-      reason: "Upcoming event at 2:00 PM today",
-      prep: {
-        risks: ["Timeline dependencies on third-party OAuth approvals", "Latency optimizations under load"],
-        talking_points: ["Discuss multi-modal model transitions", "Review assistant satisfaction rating"],
-      },
-    },
-  ];
-
-  res.json({
-    status: "ready",
-    items: priorityItems,
-    metadata: {
-      total: priorityItems.length,
-      generated_at: new Date().toISOString(),
-    },
-  });
-});
-
-// Search
-app.get("/search", (req: Request, res: Response) => {
-  const q = ((req.query.q as string) || "").toLowerCase();
-  const type = (req.query.type as string) || "all";
-  const limit = parseInt(req.query.limit as string) || 20;
-
+app.get("/search", (req: AuthRequest, res) => {
+  const q = String(req.query.q || "").toLowerCase();
   const results: any[] = [];
-
-  if (type === "all" || type === "notes") {
-    notes.forEach((n) => {
-      if (!q || n.title.toLowerCase().includes(q) || n.content.toLowerCase().includes(q)) {
-        results.push({
-          type: "note",
-          id: n.note_id,
-          score: 1.0,
-          title: n.title,
-          content: n.content,
-          tags: n.tags,
-        });
-      }
-    });
-  }
-
-  if (type === "all" || type === "tasks") {
-    tasks.forEach((t) => {
-      if (!q || t.title.toLowerCase().includes(q) || (t.notes && t.notes.toLowerCase().includes(q))) {
-        results.push({
-          type: "task",
-          id: t.id,
-          score: 0.9,
-          title: t.title,
-          notes: t.notes,
-          is_completed: t.is_completed,
-          due: t.due,
-        });
-      }
-    });
-  }
-
-  if (type === "all" || type === "events") {
-    events.forEach((e) => {
-      if (!q || e.summary.toLowerCase().includes(q) || (e.description && e.description.toLowerCase().includes(q))) {
-        results.push({
-          type: "event",
-          id: e.id,
-          score: 0.8,
-          summary: e.summary,
-          description: e.description,
-          location: e.location,
-          start: e.start,
-          end: e.end,
-        });
-      }
-    });
-  }
-
-  if (type === "all" || type === "emails") {
-    emails.forEach((em) => {
-      if (!q || em.subject.toLowerCase().includes(q) || em.snippet.toLowerCase().includes(q) || em.from.toLowerCase().includes(q)) {
-        results.push({
-          type: "email",
-          id: em.id,
-          score: 0.7,
-          subject: em.subject,
-          from_addr: em.from,
-          snippet: em.snippet,
-          is_unread: em.is_unread,
-          date: em.date,
-        });
-      }
-    });
-  }
-
-  res.json({
-    available: true,
-    query: q,
-    total: results.length,
-    results: results.slice(0, limit),
-    message: "Search completed successfully",
-  });
+  getWorkspaceScoped(notes, req).forEach((n) => { if (!q || n.title.toLowerCase().includes(q) || n.content.toLowerCase().includes(q)) results.push({ type: "note", id: n.note_id, title: n.title, content: n.content, tags: n.tags }); });
+  getWorkspaceScoped(tasks, req).forEach((t) => { if (!q || t.title.toLowerCase().includes(q) || t.notes.toLowerCase().includes(q)) results.push({ type: "task", id: t.id, title: t.title, notes: t.notes, is_completed: t.is_completed, due: t.due }); });
+  res.json({ available: true, query: q, total: results.length, results: results.slice(0, Number(req.query.limit || 20)), message: "Search completed successfully" });
 });
+app.get("/search/health", (_req, res) => res.json({ available: true, status: "ok", message: "Unified memory search engine is ready" }));
 
-app.get("/search/health", (_req: Request, res: Response) => {
-  res.json({
-    available: true,
-    status: "ok",
-    message: "Unified memory search engine is ready",
-  });
-});
-
-// ─── Vite Middleware & Static Serving ──────────────────────────────────────────
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: "spa" });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (_req: Request, res: Response) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
   }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Co-Work running on http://0.0.0.0:${PORT}`);
-  });
+  httpServer.listen(PORT, "0.0.0.0", () => console.log(`Co-Work running on http://0.0.0.0:${PORT}`));
 }
 
 startServer();
