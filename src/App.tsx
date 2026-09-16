@@ -16,6 +16,9 @@ import { TasksPanel } from './components/features/TasksPanel';
 import { NotesPanel } from './components/features/NotesPanel';
 import { MeetingSummaryPanel } from './components/features/MeetingSummaryPanel';
 import { StandupPanel } from './components/features/StandupPanel';
+import { BlockersPanel } from './components/features/BlockersPanel';
+import { ActionItemsPanel } from './components/features/ActionItemsPanel';
+import { SchedulingPanel } from './components/features/SchedulingPanel';
 import { Sparkles, Users, LogOut } from 'lucide-react';
 
 function AppContent() {
@@ -125,6 +128,9 @@ function AppContent() {
             <PriorityPanel />
             <MeetingSummaryPanel />
             <StandupPanel />
+            <BlockersPanel />
+            <ActionItemsPanel />
+            <SchedulingPanel />
             <BriefingPanel />
             <CalendarPanel />
             <TasksPanel />

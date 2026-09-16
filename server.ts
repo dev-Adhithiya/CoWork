@@ -6,6 +6,7 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import { findCandidateMeetingSlots, SchedulingParticipant } from "./src/lib/scheduling";
 
 const app = express();
 const httpServer = createServer(app);
@@ -34,6 +35,7 @@ const currentUser = {
   name: "Adhithiya",
   picture: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80",
   settings: { theme: "dark", voice_enabled: true, notifications: true },
+  timezone: "UTC",
   created_at: now(),
   last_login: now(),
 };
@@ -184,6 +186,31 @@ interface StandupDigest {
   status: "ai-generated" | "fallback";
 }
 
+interface Blocker {
+  id: string;
+  workspaceId: string;
+  sourceStandupEntryId: string;
+  description: string;
+  mentionedBy: string;
+  severity: "blocking" | "at-risk" | "fyi" | "unclassified";
+  relatedTo: string | null;
+  status: "active" | "resolved";
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+interface ActionItem {
+  id: string;
+  workspaceId: string;
+  description: string;
+  suggestedOwnerId: string | null;
+  confirmedOwnerId: string | null;
+  sourceType: "meeting" | "standup";
+  sourceId: string;
+  status: "suggested" | "confirmed" | "done";
+  createdAt: string;
+}
+
 interface AuthRequest extends Request {
   user?: typeof currentUser;
   workspace?: Workspace;
@@ -208,6 +235,8 @@ const disconnectGraceTimers = new Map<string, NodeJS.Timeout>();
 let meetingTranscripts: MeetingTranscript[] = [];
 let standupEntries: StandupEntry[] = [];
 let standupDigests: StandupDigest[] = [];
+let blockers: Blocker[] = [];
+let actionItems: ActionItem[] = [];
 const sessions: Map<string, ChatSession> = new Map();
 const githubCache = new Map<string, { expiresAt: number; data: GithubMentionData }>();
 
@@ -542,6 +571,7 @@ async function summarizeTranscript(transcript: MeetingTranscript, force = false)
   };
   transcript.summaries.push(version);
   transcript.lastSummarizedChunkIndex = transcript.chunks.length;
+  await extractActionItemsFromText(transcript.workspaceId, "meeting", transcript.id, summary);
   io.to(`workspace:${transcript.workspaceId}`).emit("meeting:summary", { transcript, version });
   return version;
 }
@@ -552,6 +582,106 @@ function todayIsoDate() {
 
 function validateDigestJson(value: any): value is { mergedSummary: string } {
   return !!value && typeof value === "object" && typeof value.mergedSummary === "string" && value.mergedSummary.trim().length > 0;
+}
+
+function validateBlockerJson(value: any): value is { blockers: Array<{ description: string; mentionedBy: string; severity: "blocking" | "at-risk" | "fyi"; relatedTo: string | null }> } {
+  return !!value && typeof value === "object" && Array.isArray(value.blockers) && value.blockers.every((blocker: any) =>
+    blocker && typeof blocker.description === "string" &&
+    typeof blocker.mentionedBy === "string" &&
+    ["blocking", "at-risk", "fyi"].includes(blocker.severity) &&
+    (blocker.relatedTo === null || typeof blocker.relatedTo === "string")
+  );
+}
+
+function validateActionItemJson(value: any): value is { actionItems: Array<{ description: string; ownerName: string | null }> } {
+  return !!value && typeof value === "object" && Array.isArray(value.actionItems) && value.actionItems.every((item: any) =>
+    item && typeof item.description === "string" && (item.ownerName === null || typeof item.ownerName === "string")
+  );
+}
+
+function memberNameForUser(workspaceId: string, userId: string) {
+  if (userId === currentUser.user_id) return currentUser.name;
+  return workspaceMembers.some((member) => member.workspaceId === workspaceId && member.userId === userId) ? userId : userId;
+}
+
+function matchWorkspaceMemberByName(workspaceId: string, ownerName: string | null) {
+  if (!ownerName) return null;
+  const normalized = ownerName.toLowerCase();
+  const members = workspaceMembers.filter((member) => member.workspaceId === workspaceId);
+  const match = members.find((member) => member.userId.toLowerCase() === normalized || memberNameForUser(workspaceId, member.userId).toLowerCase().includes(normalized));
+  if (match) return match.userId;
+  return currentUser.name.toLowerCase().includes(normalized) ? currentUser.user_id : null;
+}
+
+async function generateJsonWithRetry<T>(prompt: string, validate: (value: any) => value is T) {
+  const ai = getGemini();
+  if (!ai) return null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const result = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+      });
+      const parsed = JSON.parse(result.text || "{}");
+      if (validate(parsed)) return parsed;
+    } catch (error) {
+      console.error("Structured Gemini JSON generation failed", error);
+    }
+  }
+  return null;
+}
+
+async function extractBlockersForStandup(entry: StandupEntry) {
+  const prompt = `Return only valid JSON matching this exact schema: { "blockers": [{ "description": "string", "mentionedBy": "string", "severity": "blocking" | "at-risk" | "fyi", "relatedTo": "string or null" }] }\nExtract zero or more discrete blockers from this standup. This is best-effort NLP classification; do not invent blockers. mentionedBy must be ${entry.userName}.\nStandup text:\n${entry.content}`;
+  const parsed = await generateJsonWithRetry(prompt, validateBlockerJson);
+  const extracted = parsed?.blockers.length ? parsed.blockers : [{ description: entry.content, mentionedBy: entry.userName, severity: "unclassified" as const, relatedTo: null }];
+  const stored = extracted.map((blocker) => ({
+    id: makeId("blocker"),
+    workspaceId: entry.workspaceId,
+    sourceStandupEntryId: entry.id,
+    description: blocker.description,
+    mentionedBy: blocker.mentionedBy,
+    severity: blocker.severity,
+    relatedTo: blocker.relatedTo,
+    status: "active" as const,
+    createdAt: now(),
+    resolvedAt: null,
+  }));
+  blockers.push(...stored);
+  return stored;
+}
+
+async function extractActionItemsFromText(workspaceId: string, sourceType: "meeting" | "standup", sourceId: string, text: string) {
+  const memberList = workspaceMembers.filter((member) => member.workspaceId === workspaceId).map((member) => `${memberNameForUser(workspaceId, member.userId)} (${member.userId})`).join(", ");
+  const prompt = `Return only valid JSON matching this exact schema: { "actionItems": [{ "description": "string", "ownerName": "string or null" }] }\nExtract concrete action items. If the text names a specific owner, set ownerName to that name; otherwise null. Never guess an owner. Workspace members: ${memberList || "none"}.\nText:\n${text}`;
+  const parsed = await generateJsonWithRetry(prompt, validateActionItemJson);
+  const fallbackItems = () => text
+    .split(/[.!?\n]/)
+    .map((part) => part.trim())
+    .filter((part) => /\b(will|follow up|need to|needs to|todo|action)\b/i.test(part))
+    .slice(0, 5)
+    .map((description) => ({
+      description,
+      ownerName: description.toLowerCase().includes(currentUser.name.toLowerCase()) ? currentUser.name : null,
+    }));
+  const actionSource = parsed?.actionItems.length ? parsed.actionItems : fallbackItems();
+  const existingKeys = new Set(actionItems.map((item) => `${item.sourceType}:${item.sourceId}:${item.description}`));
+  const stored = actionSource
+    .filter((item) => item.description.trim())
+    .filter((item) => !existingKeys.has(`${sourceType}:${sourceId}:${item.description}`))
+    .map((item) => ({
+      id: makeId("action"),
+      workspaceId,
+      description: item.description,
+      suggestedOwnerId: matchWorkspaceMemberByName(workspaceId, item.ownerName),
+      confirmedOwnerId: null,
+      sourceType,
+      sourceId,
+      status: "suggested" as const,
+      createdAt: now(),
+    }));
+  actionItems.push(...stored);
+  return stored;
 }
 
 async function generateStandupDigest(workspaceId: string, date: string) {
@@ -595,6 +725,7 @@ async function generateStandupDigest(workspaceId: string, date: string) {
   };
   standupDigests = standupDigests.filter((item) => !(item.workspaceId === workspaceId && item.date === date));
   standupDigests.push(digest);
+  await extractActionItemsFromText(workspaceId, "standup", digest.id, mergedSummary);
   io.to(`workspace:${workspaceId}`).emit("standup:digest", { digest });
   return digest;
 }
@@ -766,7 +897,7 @@ app.get("/api/meeting-transcripts/:transcriptId", (req: AuthRequest, res) => {
   res.json(transcript);
 });
 
-app.post("/api/workspaces/:id/standup-entries", (req: AuthRequest, res) => {
+app.post("/api/workspaces/:id/standup-entries", async (req: AuthRequest, res) => {
   if (!requireWorkspaceMembership(req, res)) return;
   const content = String(req.body.content || "").trim();
   const date = String(req.body.date || todayIsoDate()).slice(0, 10);
@@ -781,8 +912,10 @@ app.post("/api/workspaces/:id/standup-entries", (req: AuthRequest, res) => {
     createdAt: now(),
   };
   standupEntries.push(entry);
+  // Best-effort NLP classification: false negatives/positives are expected, and UI labels this as inferred.
+  const extractedBlockers = await extractBlockersForStandup(entry);
   io.to(`workspace:${req.params.id}`).emit("standup:entry", { entry });
-  res.status(201).json(entry);
+  res.status(201).json({ ...entry, extractedBlockers });
 });
 
 app.get("/api/workspaces/:id/standup-entries", (req: AuthRequest, res) => {
@@ -805,6 +938,94 @@ app.get("/api/workspaces/:id/standup-digests", (req: AuthRequest, res) => {
   const date = req.query.date ? String(req.query.date).slice(0, 10) : null;
   const digests = standupDigests.filter((digest) => digest.workspaceId === req.params.id && (!date || digest.date === date));
   res.json({ digests });
+});
+
+app.get("/api/workspaces/:id/blockers", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const rank = { blocking: 0, "at-risk": 1, unclassified: 2, fyi: 3 };
+  const includeResolved = req.query.includeResolved === "true";
+  const items = blockers
+    .filter((blocker) => blocker.workspaceId === req.params.id && (includeResolved || blocker.status === "active"))
+    .sort((a, b) => rank[a.severity] - rank[b.severity] || a.createdAt.localeCompare(b.createdAt));
+  res.json({ blockers: items });
+});
+
+app.patch("/api/blockers/:blockerId/resolve", (req: AuthRequest, res) => {
+  const blocker = blockers.find((item) => item.id === req.params.blockerId && item.workspaceId === req.workspace?.id);
+  if (!blocker) return res.status(404).json({ error: "Blocker not found" });
+  blocker.status = "resolved";
+  blocker.resolvedAt = now();
+  res.json(blocker);
+});
+
+app.get("/api/workspaces/:id/action-items", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  res.json({ actionItems: actionItems.filter((item) => item.workspaceId === req.params.id) });
+});
+
+app.patch("/api/action-items/:actionItemId/confirm", (req: AuthRequest, res) => {
+  const item = actionItems.find((candidate) => candidate.id === req.params.actionItemId && candidate.workspaceId === req.workspace?.id);
+  if (!item) return res.status(404).json({ error: "Action item not found" });
+  item.confirmedOwnerId = req.user!.user_id;
+  item.status = "confirmed";
+  res.json(item);
+});
+
+app.patch("/api/action-items/:actionItemId/reassign", (req: AuthRequest, res) => {
+  const item = actionItems.find((candidate) => candidate.id === req.params.actionItemId && candidate.workspaceId === req.workspace?.id);
+  if (!item) return res.status(404).json({ error: "Action item not found" });
+  const userId = String(req.body.userId || "").trim();
+  if (!workspaceMembers.some((member) => member.workspaceId === item.workspaceId && member.userId === userId)) return res.status(400).json({ error: "New owner must be a workspace member" });
+  item.suggestedOwnerId = userId;
+  item.confirmedOwnerId = null;
+  item.status = "suggested";
+  res.json(item);
+});
+
+app.patch("/api/action-items/:actionItemId/status", (req: AuthRequest, res) => {
+  const item = actionItems.find((candidate) => candidate.id === req.params.actionItemId && candidate.workspaceId === req.workspace?.id);
+  if (!item) return res.status(404).json({ error: "Action item not found" });
+  const status = String(req.body.status || "");
+  if (status === "done" && !item.confirmedOwnerId) return res.status(409).json({ error: "A human must confirm ownership before an item can be marked done" });
+  if (status !== "done" && status !== "confirmed" && status !== "suggested") return res.status(400).json({ error: "Invalid status" });
+  if (status === "confirmed" && !item.confirmedOwnerId) return res.status(409).json({ error: "Use confirm endpoint to confirm human ownership" });
+  item.status = status as ActionItem["status"];
+  res.json(item);
+});
+
+app.patch("/api/users/me/timezone", (req: AuthRequest, res) => {
+  const timezone = String(req.body.timezone || "").trim();
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(new Date());
+  } catch {
+    return res.status(400).json({ error: "Invalid IANA timezone" });
+  }
+  req.user!.timezone = timezone;
+  userPreferences.timezone = timezone;
+  userPreferences.updated_at = now();
+  res.json({ user: req.user, timezone });
+});
+
+app.post("/api/workspaces/:id/schedule/suggestions", (req: AuthRequest, res) => {
+  if (!requireWorkspaceMembership(req, res)) return;
+  const durationMinutes = Math.max(15, Math.min(480, Number(req.body.durationMinutes || 30)));
+  const requestedParticipants = Array.isArray(req.body.participantIds) && req.body.participantIds.length ? req.body.participantIds.map(String) : [req.user!.user_id];
+  const members = workspaceMembers.filter((member) => member.workspaceId === req.params.id && requestedParticipants.includes(member.userId));
+  const participants: SchedulingParticipant[] = members.map((member) => {
+    const isCurrent = member.userId === req.user!.user_id;
+    return {
+      userId: member.userId,
+      timezone: isCurrent ? (req.user!.timezone || userPreferences.timezone || "UTC") : "UTC",
+      workingHours: userPreferences.working_hours,
+      busyRanges: isCurrent ? getWorkspaceScoped(events, req).map((event) => ({ start: event.start, end: event.end })) : [],
+    };
+  });
+  const suggestions = findCandidateMeetingSlots(participants, durationMinutes, {
+    searchStart: req.body.searchStart || now(),
+    days: Number(req.body.days || 7),
+    stepMinutes: 30,
+  });
+  res.json({ suggestions, participants });
 });
 
 app.get("/api/workspaces/:id/members", (req: AuthRequest, res) => {
