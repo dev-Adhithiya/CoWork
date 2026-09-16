@@ -1,0 +1,62 @@
+--- server.ts
++++ server.ts
+@@ -23,6 +23,54 @@
+   return geminiClient;
+ }
+ 
++// ─── Workspace Types & Data ───────────────────────────────────────────────────
++
++export interface Workspace {
++  id: string;
++  name: string;
++  createdAt: string;
++  ownerId: string;
++}
++
++export interface WorkspaceMember {
++  workspaceId: string;
++  userId: string;
++  role: "owner" | "admin" | "member";
++  joinedAt: string;
++}
++
++export interface Channel {
++  id: string;
++  workspaceId: string;
++  name: string;
++  createdAt: string;
++  createdBy: string;
++  linkedGithubRepo: string | null;
++}
++
++export interface ChannelMember {
++  channelId: string;
++  userId: string;
++  joinedAt: string;
++}
++
++let workspaces: Workspace[] = [];
++let workspaceMembers: WorkspaceMember[] = [];
++let channels: Channel[] = [];
++let channelMembers: ChannelMember[] = [];
++
+ // ─── In-Memory Data Stores ─────────────────────────────────────────────────────
+ 
+ const currentUser = {
+@@ -37,6 +85,16 @@
+   created_at: new Date().toISOString(),
+   last_login: new Date().toISOString(),
+ };
++
++// Seed initial personal workspace
++const defaultWorkspaceId = `ws_personal_${currentUser.user_id}`;
++workspaces.push({ id: defaultWorkspaceId, name: "Personal", createdAt: new Date().toISOString(), ownerId: currentUser.user_id });
++workspaceMembers.push({ workspaceId: defaultWorkspaceId, userId: currentUser.user_id, role: "owner", joinedAt: new Date().toISOString() });
++
++// Seed initial general channel
++const defaultChannelId = `chan_general_${Date.now()}`;
++channels.push({ id: defaultChannelId, workspaceId: defaultWorkspaceId, name: "general", createdAt: new Date().toISOString(), createdBy: currentUser.user_id, linkedGithubRepo: null });
++channelMembers.push({ channelId: defaultChannelId, userId: currentUser.user_id, joinedAt: new Date().toISOString() });
+ 
+ interface ChatMessage {
+   role: "user" | "assistant";

@@ -1,0 +1,113 @@
+--- server.ts
++++ server.ts
+@@ -46,6 +46,7 @@
+   created_at: string;
+   updated_at: string;
+   messages: ChatMessage[];
++  workspaceId?: string;
+ }
+ 
+ const sessions: Map<string, ChatSession> = new Map();
+@@ -62,6 +63,7 @@
+       timestamp: new Date().toISOString(),
+     },
+   ],
++  workspaceId: defaultWorkspaceId
+ });
+ 
+ let events = [
+@@ -74,6 +76,7 @@
+     description: "Review sprint deliverables, architectural progress, and AI assistant enhancements.",
+     meet_link: "https://meet.google.com/zen-ith-meet",
+     attendees: ["askadhithiya@gmail.com", "sarah.chen@techcorp.io", "alex.dev@techcorp.io"],
++    workspaceId: defaultWorkspaceId
+   },
+   {
+     id: "evt_2",
+@@ -83,6 +86,7 @@
+     description: "Discussion on multi-modal tool routing and token caching strategies.",
+     meet_link: "https://meet.google.com/arch-sync-now",
+     attendees: ["askadhithiya@gmail.com", "elena.rostova@cloud.io"],
++    workspaceId: defaultWorkspaceId
+   },
+   {
+     id: "evt_3",
+@@ -92,6 +96,7 @@
+     description: "Review quarterly objectives, user satisfaction metrics, and upcoming milestones.",
+     meet_link: "",
+     attendees: ["askadhithiya@gmail.com", "leadership@techcorp.io"],
++    workspaceId: defaultWorkspaceId
+   },
+ ];
+ 
+@@ -103,6 +108,7 @@
+     due: new Date(Date.now() + 1000 * 60 * 60 * 8).toISOString(),
+     is_completed: false,
+     created_at: new Date().toISOString(),
++    workspaceId: defaultWorkspaceId
+   },
+   {
+     id: "task_2",
+@@ -111,6 +117,7 @@
+     due: new Date(Date.now() + 1000 * 60 * 60 * 12).toISOString(),
+     is_completed: false,
+     created_at: new Date().toISOString(),
++    workspaceId: defaultWorkspaceId
+   },
+   {
+     id: "task_3",
+@@ -119,6 +126,7 @@
+     due: new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(),
+     is_completed: false,
+     created_at: new Date().toISOString(),
++    workspaceId: defaultWorkspaceId
+   },
+   {
+     id: "task_4",
+@@ -127,6 +135,7 @@
+     due: new Date(Date.now() - 1000 * 60 * 60 * 10).toISOString(),
+     is_completed: true,
+     created_at: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(),
++    workspaceId: defaultWorkspaceId
+   },
+ ];
+ 
+@@ -139,6 +148,7 @@
+     source: "cowork_core",
+     created_at: new Date().toISOString(),
+     updated_at: new Date().toISOString(),
++    workspaceId: defaultWorkspaceId
+   },
+   {
+     note_id: "note_2",
+@@ -148,6 +158,7 @@
+     source: "calendar_prep",
+     created_at: new Date(Date.now() - 86400000).toISOString(),
+     updated_at: new Date().toISOString(),
++    workspaceId: defaultWorkspaceId
+   },
+ ];
+ 
+@@ -163,6 +174,7 @@
+       "<p>Hi Adhithiya,</p><p>Could you please take a look at the attached roadmap revisions? We need your sign-off before 3 PM today to finalize the executive presentation.</p><ul><li>Launch date set for October 15th</li><li>Additional engineering capacity assigned to assistant integrations</li></ul><p>Thanks!<br>Sarah</p>",
+     is_unread: true,
+     date: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
++    workspaceId: defaultWorkspaceId
+   },
+   {
+     id: "mail_2",
+@@ -174,6 +186,7 @@
+       "<p>Your Cloud Run service <strong>cowork-app</strong> has been successfully updated to revision <code>cowork-app-00042</code>.</p><p>All health checks passed in region asia-east1.</p>",
+     is_unread: false,
+     date: new Date(Date.now() - 1000 * 60 * 180).toISOString(),
++    workspaceId: defaultWorkspaceId
+   },
+   {
+     id: "mail_3",
+@@ -185,6 +198,7 @@
+       "<p>Hi Adhithiya,</p><p>The agenda for today's sprint review has been posted. Looking forward to showing off the new glassmorphic UI.</p><p>Best,<br>Alex</p>",
+     is_unread: true,
+     date: new Date(Date.now() - 240 * 60 * 1000).toISOString(),
++    workspaceId: defaultWorkspaceId
+   },
+ ];

@@ -22,6 +22,42 @@ function getGemini(): GoogleGenAI | null {
   return geminiClient;
 }
 
+// ─── Workspace Types & Data ───────────────────────────────────────────────────
+
+export interface Workspace {
+  id: string;
+  name: string;
+  createdAt: string;
+  ownerId: string;
+}
+
+export interface WorkspaceMember {
+  workspaceId: string;
+  userId: string;
+  role: "owner" | "admin" | "member";
+  joinedAt: string;
+}
+
+export interface Channel {
+  id: string;
+  workspaceId: string;
+  name: string;
+  createdAt: string;
+  createdBy: string;
+  linkedGithubRepo: string | null;
+}
+
+export interface ChannelMember {
+  channelId: string;
+  userId: string;
+  joinedAt: string;
+}
+
+let workspaces: Workspace[] = [];
+let workspaceMembers: WorkspaceMember[] = [];
+let channels: Channel[] = [];
+let channelMembers: ChannelMember[] = [];
+
 // ─── In-Memory Data Stores ─────────────────────────────────────────────────────
 
 const currentUser = {
@@ -38,6 +74,16 @@ const currentUser = {
   last_login: new Date().toISOString(),
 };
 
+// Seed initial personal workspace
+const defaultWorkspaceId = `ws_personal_${currentUser.user_id}`;
+workspaces.push({ id: defaultWorkspaceId, name: "Personal", createdAt: new Date().toISOString(), ownerId: currentUser.user_id });
+workspaceMembers.push({ workspaceId: defaultWorkspaceId, userId: currentUser.user_id, role: "owner", joinedAt: new Date().toISOString() });
+
+// Seed initial general channel
+const defaultChannelId = `chan_general_${Date.now()}`;
+channels.push({ id: defaultChannelId, workspaceId: defaultWorkspaceId, name: "general", createdAt: new Date().toISOString(), createdBy: currentUser.user_id, linkedGithubRepo: null });
+channelMembers.push({ channelId: defaultChannelId, userId: currentUser.user_id, joinedAt: new Date().toISOString() });
+
 interface ChatMessage {
   role: "user" | "assistant";
   content: string;
@@ -52,6 +98,7 @@ interface ChatSession {
   created_at: string;
   updated_at: string;
   messages: ChatMessage[];
+  workspaceId?: string;
 }
 
 const sessions: Map<string, ChatSession> = new Map();
@@ -71,6 +118,7 @@ sessions.set(defaultSessionId, {
       timestamp: new Date().toISOString(),
     },
   ],
+  workspaceId: defaultWorkspaceId,
 });
 
 let events = [
@@ -83,6 +131,7 @@ let events = [
     description: "Review sprint deliverables, architectural progress, and AI assistant enhancements.",
     meet_link: "https://meet.google.com/zen-ith-meet",
     attendees: ["askadhithiya@gmail.com", "sarah.chen@techcorp.io", "alex.dev@techcorp.io"],
+    workspaceId: defaultWorkspaceId,
   },
   {
     id: "evt_2",
@@ -93,6 +142,7 @@ let events = [
     description: "Discussion on multi-modal tool routing and token caching strategies.",
     meet_link: "https://meet.google.com/arch-sync-now",
     attendees: ["askadhithiya@gmail.com", "elena.rostova@cloud.io"],
+    workspaceId: defaultWorkspaceId,
   },
   {
     id: "evt_3",
@@ -103,6 +153,7 @@ let events = [
     description: "Review quarterly objectives, user satisfaction metrics, and upcoming milestones.",
     meet_link: "",
     attendees: ["askadhithiya@gmail.com", "leadership@techcorp.io"],
+    workspaceId: defaultWorkspaceId,
   },
 ];
 
@@ -114,6 +165,7 @@ let tasks = [
     due: new Date(Date.now() + 1000 * 60 * 60 * 8).toISOString(),
     is_completed: false,
     created_at: new Date().toISOString(),
+    workspaceId: defaultWorkspaceId,
   },
   {
     id: "task_2",
@@ -122,6 +174,7 @@ let tasks = [
     due: new Date(Date.now() + 1000 * 60 * 60 * 12).toISOString(),
     is_completed: false,
     created_at: new Date().toISOString(),
+    workspaceId: defaultWorkspaceId,
   },
   {
     id: "task_3",
@@ -130,6 +183,7 @@ let tasks = [
     due: new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(),
     is_completed: false,
     created_at: new Date().toISOString(),
+    workspaceId: defaultWorkspaceId,
   },
   {
     id: "task_4",
@@ -138,6 +192,7 @@ let tasks = [
     due: new Date(Date.now() - 1000 * 60 * 60 * 10).toISOString(),
     is_completed: true,
     created_at: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(),
+    workspaceId: defaultWorkspaceId,
   },
 ];
 
@@ -151,6 +206,7 @@ let notes = [
     source: "cowork_core",
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
+    workspaceId: defaultWorkspaceId,
   },
   {
     note_id: "note_2",
@@ -161,6 +217,7 @@ let notes = [
     source: "calendar_prep",
     created_at: new Date(Date.now() - 86400000).toISOString(),
     updated_at: new Date().toISOString(),
+    workspaceId: defaultWorkspaceId,
   },
 ];
 
@@ -176,6 +233,7 @@ let emails = [
       "<p>Hi Adhithiya,</p><p>Could you please take a look at the attached roadmap revisions? We need your sign-off before 3 PM today to finalize the executive presentation.</p><ul><li>Launch date set for October 15th</li><li>Additional engineering capacity assigned to assistant integrations</li></ul><p>Thanks!<br>Sarah</p>",
     is_unread: true,
     date: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
+    workspaceId: defaultWorkspaceId,
   },
   {
     id: "mail_2",
@@ -188,6 +246,7 @@ let emails = [
       "<p>Your Cloud Run service <strong>cowork-app</strong> has been successfully updated to revision <code>cowork-app-00042</code>.</p><p>All health checks passed in region asia-east1.</p>",
     is_unread: false,
     date: new Date(Date.now() - 1000 * 60 * 180).toISOString(),
+    workspaceId: defaultWorkspaceId,
   },
   {
     id: "mail_3",
@@ -200,6 +259,7 @@ let emails = [
       "<p>Hi Adhithiya,</p><p>The agenda for today's sprint review has been posted. Looking forward to showing off the new glassmorphic UI.</p><p>Best,<br>Alex</p>",
     is_unread: true,
     date: new Date(Date.now() - 1000 * 60 * 240).toISOString(),
+    workspaceId: defaultWorkspaceId,
   },
 ];
 
@@ -223,6 +283,127 @@ let userPreferences = {
 };
 
 // ─── API Routes ────────────────────────────────────────────────────────────────
+
+export interface AuthRequest extends Request {
+  user?: typeof currentUser;
+  workspace?: Workspace;
+}
+
+const authMiddleware = (req: AuthRequest, res: Response, next: express.NextFunction) => {
+  // Mock authentication: always use currentUser in this single-user mock backend
+  req.user = currentUser;
+
+  // Resolve workspace from header
+  const workspaceId = req.headers['x-workspace-id'] as string;
+  let workspace = workspaces.find((w) => w.id === workspaceId);
+  
+  // Fallback to personal workspace if not provided
+  if (!workspace) {
+    workspace = workspaces.find((w) => w.ownerId === currentUser.user_id && w.name === "Personal");
+  }
+  
+  req.workspace = workspace;
+  next();
+};
+
+app.use("/api", authMiddleware);
+// Apply to existing root-level routes for now to ensure backwards compatibility
+app.use("/tasks", authMiddleware);
+app.use("/notes", authMiddleware);
+app.use("/calendar", authMiddleware);
+app.use("/gmail", authMiddleware);
+app.use("/sessions", authMiddleware);
+app.use("/chat", authMiddleware);
+
+// Workspace & Channel CRUD API Routes
+
+app.get("/api/workspaces", (req: AuthRequest, res: Response) => {
+  // Find workspaces the user is a member of
+  const myWorkspaceIds = workspaceMembers.filter(m => m.userId === req.user?.user_id).map(m => m.workspaceId);
+  const myWorkspaces = workspaces.filter(w => myWorkspaceIds.includes(w.id));
+  res.json(myWorkspaces);
+});
+
+app.post("/api/workspaces", (req: AuthRequest, res: Response) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: "Name is required" });
+
+  const newWorkspace: Workspace = {
+    id: `ws_${Date.now()}`,
+    name,
+    createdAt: new Date().toISOString(),
+    ownerId: req.user!.user_id
+  };
+  workspaces.push(newWorkspace);
+  
+  workspaceMembers.push({
+    workspaceId: newWorkspace.id,
+    userId: req.user!.user_id,
+    role: "owner",
+    joinedAt: new Date().toISOString()
+  });
+
+  // Create default general channel
+  const defaultChannel: Channel = {
+    id: `chan_${Date.now()}`,
+    workspaceId: newWorkspace.id,
+    name: "general",
+    createdAt: new Date().toISOString(),
+    createdBy: req.user!.user_id,
+    linkedGithubRepo: null
+  };
+  channels.push(defaultChannel);
+  channelMembers.push({ channelId: defaultChannel.id, userId: req.user!.user_id, joinedAt: new Date().toISOString() });
+
+  res.status(201).json(newWorkspace);
+});
+
+app.get("/api/workspaces/:id/members", (req: AuthRequest, res: Response) => {
+  const members = workspaceMembers.filter(m => m.workspaceId === req.params.id);
+  res.json(members);
+});
+
+app.post("/api/workspaces/:id/members", (req: AuthRequest, res: Response) => {
+  const { userId, role } = req.body;
+  if (!userId) return res.status(400).json({ error: "userId is required" });
+  
+  const newMember: WorkspaceMember = {
+    workspaceId: req.params.id,
+    userId,
+    role: role || "member",
+    joinedAt: new Date().toISOString()
+  };
+  workspaceMembers.push(newMember);
+  res.status(201).json(newMember);
+});
+
+app.get("/api/workspaces/:id/channels", (req: AuthRequest, res: Response) => {
+  const wsChannels = channels.filter(c => c.workspaceId === req.params.id);
+  res.json(wsChannels);
+});
+
+app.post("/api/workspaces/:id/channels", (req: AuthRequest, res: Response) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: "Name is required" });
+
+  const newChannel: Channel = {
+    id: `chan_${Date.now()}`,
+    workspaceId: req.params.id,
+    name,
+    createdAt: new Date().toISOString(),
+    createdBy: req.user!.user_id,
+    linkedGithubRepo: null
+  };
+  channels.push(newChannel);
+  channelMembers.push({ channelId: newChannel.id, userId: req.user!.user_id, joinedAt: new Date().toISOString() });
+  
+  res.status(201).json(newChannel);
+});
+
+app.get("/api/channels/:id/members", (req: AuthRequest, res: Response) => {
+  const members = channelMembers.filter(m => m.channelId === req.params.id);
+  res.json(members);
+});
 
 // Health
 app.get("/health", (_req: Request, res: Response) => {
